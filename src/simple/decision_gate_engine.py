@@ -23,8 +23,8 @@ S18_STATE_PATH = STATE_DIR / "s18_decision_gate_state.json"
 DECISION_GATE_LOG_PATH = DATA_DIR / "decision_gate_history.jsonl"
 REPORT_PATH = REPORTS_DIR / "s18_decision_gate_latest_report.md"
 
-MIN_RR_TP1 = 1.0
-MIN_RR_TP2 = 1.5
+MIN_RR_TP1 = 1.5
+MIN_RR_TP2 = 2.0
 
 
 def _now_utc() -> str:
@@ -72,6 +72,9 @@ def compute_decision_gate(
     flow_state: dict[str, Any] | None,
     evidence: dict[str, Any] | None,
     persistence: dict[str, Any] | None,
+    depth_memory: dict[str, Any] | None = None,
+    wall_lifecycle: dict[str, Any] | None = None,
+    context_sync: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ts = _now_utc()
     block_reasons: list[str] = []
@@ -133,6 +136,24 @@ def compute_decision_gate(
         and plan_exec_safety.get("live_order_sent", True) is False
     )
     reasons_present = len(plan_reason_codes) > 0
+
+    # Depth veto
+    depth_veto = False
+    depth_reason: str | None = None
+    if depth_memory and depth_memory.get("available"):
+        sweep_risk = (depth_memory.get("sweep_risk") or {}).get("sweep_risk")
+        if sweep_risk == "IMMINENT":
+            depth_veto = True
+            depth_reason = "SWEEP_RISK_IMMINENT"
+    if not depth_veto and wall_lifecycle:
+        wall_conclusion = (wall_lifecycle.get("liquidity_intelligence") or {}).get("dominant_conclusion")
+        if wall_conclusion == "LIKELY_SPOOF":
+            depth_veto = True
+            depth_reason = "LIKELY_SPOOF_WALL"
+    if depth_veto and depth_reason:
+        block_reasons.append(f"DEPTH_VETO_{depth_reason}")
+
+    context_id = (context_sync or {}).get("context_id")
 
     if not input_available:
         block_reasons.append("INPUT_NOT_AVAILABLE")
@@ -244,7 +265,10 @@ def compute_decision_gate(
         "block_id": "S18_DECISION_GATE",
         "symbol": symbol,
         "source": source,
+        "context_id": context_id,
         "input_status": input_status,
+        "depth_veto": depth_veto,
+        "depth_reason": depth_reason,
         "decision": decision,
         "decision_status": decision_status,
         "allowed_for_paper_alert": allowed_for_paper_alert,
@@ -333,19 +357,23 @@ def run_decision_gate_engine() -> dict[str, Any]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    trade_plan = _load_json(TRADE_PLAN_PATH)
+    trade_plan       = _load_json(TRADE_PLAN_PATH)
     scenario_trigger = _load_json(SCENARIO_TRIGGER_PATH)
-    setup_context = _load_json(SETUP_CONTEXT_PATH)
-    flow_state = _load_json(FLOW_STATE_PATH)
-    evidence = _load_json(EVIDENCE_PATH)
-    persistence = _load_json(PERSISTENCE_PATH)
+    setup_context    = _load_json(SETUP_CONTEXT_PATH)
+    flow_state       = _load_json(FLOW_STATE_PATH)
+    evidence         = _load_json(EVIDENCE_PATH)
+    persistence      = _load_json(PERSISTENCE_PATH)
+    depth_memory     = _load_json(STATE_DIR / "latest_depth_liquidity_memory.json")
+    wall_lifecycle   = _load_json(STATE_DIR / "latest_wall_lifecycle.json")
+    context_sync     = _load_json(STATE_DIR / "latest_context_sync.json")
 
     if trade_plan is None:
         result = no_valid_output("TRADE_PLAN_MISSING")
     else:
         try:
             result = compute_decision_gate(
-                trade_plan, scenario_trigger, setup_context, flow_state, evidence, persistence
+                trade_plan, scenario_trigger, setup_context, flow_state, evidence, persistence,
+                depth_memory, wall_lifecycle, context_sync,
             )
         except Exception:
             result = no_valid_output("COMPUTE_ERROR")

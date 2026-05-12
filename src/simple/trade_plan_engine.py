@@ -17,13 +17,16 @@ FLOW_STATE_PATH = STATE_DIR / "latest_flow_state.json"
 EVIDENCE_PATH = STATE_DIR / "latest_flow_evidence.json"
 PERSISTENCE_PATH = STATE_DIR / "latest_flow_persistence.json"
 
+DEPTH_MEMORY_PATH = STATE_DIR / "latest_depth_liquidity_memory.json"
+CONTEXT_SYNC_PATH = STATE_DIR / "latest_context_sync.json"
+
 TRADE_PLAN_PATH = STATE_DIR / "latest_trade_plan.json"
 S17_STATE_PATH = STATE_DIR / "s17_trade_plan_state.json"
 TRADE_PLAN_LOG_PATH = DATA_DIR / "trade_plan_history.jsonl"
 REPORT_PATH = REPORTS_DIR / "s17_trade_plan_latest_report.md"
 
-MIN_RR_TP1 = 1.0
-MIN_RR_TP2 = 1.5
+MIN_RR_TP1 = 1.5
+MIN_RR_TP2 = 2.0
 MIN_STOP_PCT = 0.0015
 MAX_STOP_PCT = 0.0080
 
@@ -57,6 +60,57 @@ def _extract_reference_price(flow_state: dict[str, Any] | None, evidence: dict[s
             if isinstance(v, (int, float)) and v > 0:
                 return float(v)
     return None
+
+
+def _structural_sl_tp(
+    side: str,
+    entry: float,
+    depth_memory: dict,
+) -> tuple[float | None, float | None, float | None, str]:
+    """
+    Order book duvarlarina gore yapisal SL ve TP hesapla.
+    
+    Returns: (stop_loss, tp1, tp2, method)
+    method: "STRUCTURAL" veya "FALLBACK"
+    """
+    if not depth_memory or not depth_memory.get("available"):
+        return None, None, None, "FALLBACK"
+
+    bid_wall = depth_memory.get("bid_wall", {})
+    ask_wall = depth_memory.get("ask_wall", {})
+    sl_ref   = depth_memory.get("structural_sl_reference", {})
+
+    if side == "LONG":
+        # SL: bid duvarinin biraz altı (duvar kırılırsa senaryo bozuldu)
+        bid_wall_price = bid_wall.get("wall_price") or sl_ref.get("long_sl_reference")
+        if bid_wall_price and bid_wall_price < entry:
+            sl = round(bid_wall_price * 0.9995, 4)  # duvarin %0.05 altı
+            stop_dist = abs(entry - sl)
+            if stop_dist > 0:
+                tp1 = round(entry + stop_dist * 1.5, 4)  # min 1.5 RR
+                tp2 = round(entry + stop_dist * 2.5, 4)  # min 2.5 RR
+                # Ask duvarı varsa TP hedef olarak kullan
+                ask_wall_price = ask_wall.get("wall_price")
+                if ask_wall_price and ask_wall_price > entry:
+                    tp1 = round(min(tp1, ask_wall_price * 0.9998), 4)
+                return sl, tp1, tp2, "STRUCTURAL"
+
+    elif side == "SHORT":
+        # SL: ask duvarinin biraz üstü
+        ask_wall_price = ask_wall.get("wall_price") or sl_ref.get("short_sl_reference")
+        if ask_wall_price and ask_wall_price > entry:
+            sl = round(ask_wall_price * 1.0005, 4)  # duvarin %0.05 ustü
+            stop_dist = abs(sl - entry)
+            if stop_dist > 0:
+                tp1 = round(entry - stop_dist * 1.5, 4)
+                tp2 = round(entry - stop_dist * 2.5, 4)
+                # Bid duvarı varsa TP hedef olarak kullan
+                bid_wall_price = bid_wall.get("wall_price")
+                if bid_wall_price and bid_wall_price < entry:
+                    tp1 = round(max(tp1, bid_wall_price * 1.0002), 4)
+                return sl, tp1, tp2, "STRUCTURAL"
+
+    return None, None, None, "FALLBACK"
 
 
 def _stop_pct(trigger_strength: float, confidence: float) -> float:
@@ -98,6 +152,8 @@ def compute_trade_plan(
     flow_state: dict[str, Any] | None,
     evidence: dict[str, Any] | None,
     persistence: dict[str, Any] | None,
+    depth_memory: dict[str, Any] | None = None,
+    context_sync: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ts = _now_utc()
     reason_codes: list[str] = []
@@ -183,12 +239,12 @@ def compute_trade_plan(
         sp = _stop_pct(trigger_strength, confidence)
         if side == "LONG":
             stop_loss = round(entry_price * (1.0 - sp), 4)
-            tp1 = round(entry_price * (1.0 + sp * 1.2), 4)
-            tp2 = round(entry_price * (1.0 + sp * 2.0), 4)
+            tp1 = round(entry_price * (1.0 + sp * 1.5), 4)
+            tp2 = round(entry_price * (1.0 + sp * 2.5), 4)
         else:
             stop_loss = round(entry_price * (1.0 + sp), 4)
-            tp1 = round(entry_price * (1.0 - sp * 1.2), 4)
-            tp2 = round(entry_price * (1.0 - sp * 2.0), 4)
+            tp1 = round(entry_price * (1.0 - sp * 1.5), 4)
+            tp2 = round(entry_price * (1.0 - sp * 2.5), 4)
         invalidation_price = stop_loss
         stop_dist = abs(entry_price - stop_loss)
         if stop_dist > 0:
@@ -205,12 +261,12 @@ def compute_trade_plan(
         sp = _stop_pct(trigger_strength, confidence)
         if side == "LONG":
             stop_loss = round(entry_price * (1.0 - sp), 4)
-            tp1 = round(entry_price * (1.0 + sp * 1.2), 4)
-            tp2 = round(entry_price * (1.0 + sp * 2.0), 4)
+            tp1 = round(entry_price * (1.0 + sp * 1.5), 4)
+            tp2 = round(entry_price * (1.0 + sp * 2.5), 4)
         else:
             stop_loss = round(entry_price * (1.0 + sp), 4)
-            tp1 = round(entry_price * (1.0 - sp * 1.2), 4)
-            tp2 = round(entry_price * (1.0 - sp * 2.0), 4)
+            tp1 = round(entry_price * (1.0 - sp * 1.5), 4)
+            tp2 = round(entry_price * (1.0 - sp * 2.5), 4)
         invalidation_price = stop_loss
         stop_dist = abs(entry_price - stop_loss)
         if stop_dist > 0:
@@ -229,12 +285,12 @@ def compute_trade_plan(
         else:
             if side == "LONG":
                 stop_loss = round(entry_price * (1.0 - sp), 4)
-                tp1 = round(entry_price * (1.0 + sp * 1.2), 4)
-                tp2 = round(entry_price * (1.0 + sp * 2.0), 4)
+                tp1 = round(entry_price * (1.0 + sp * 1.5), 4)
+                tp2 = round(entry_price * (1.0 + sp * 2.5), 4)
             else:
                 stop_loss = round(entry_price * (1.0 + sp), 4)
-                tp1 = round(entry_price * (1.0 - sp * 1.2), 4)
-                tp2 = round(entry_price * (1.0 - sp * 2.0), 4)
+                tp1 = round(entry_price * (1.0 - sp * 1.5), 4)
+                tp2 = round(entry_price * (1.0 - sp * 2.5), 4)
             invalidation_price = stop_loss
             stop_dist = abs(entry_price - stop_loss)
             if stop_dist <= 0:
@@ -310,11 +366,15 @@ def compute_trade_plan(
         "PAPER_ONLY",
     ]
 
+    # context_id'yi sync'ten al
+    context_id = (context_sync or {}).get("context_id", "CTX_UNKNOWN") if context_sync else "CTX_UNKNOWN"
+
     return {
         "timestamp_utc": ts,
         "block_id": "S17_TRADE_PLAN_ENGINE",
         "symbol": symbol,
         "source": source,
+        "context_id": context_id,
         "input_status": input_status,
         "plan_status": plan_status,
         "side": side,
@@ -406,12 +466,17 @@ def run_trade_plan_engine() -> dict[str, Any]:
     flow_state = _load_json(FLOW_STATE_PATH)
     evidence = _load_json(EVIDENCE_PATH)
     persistence = _load_json(PERSISTENCE_PATH)
+    depth_memory = _load_json(DEPTH_MEMORY_PATH)
+    context_sync = _load_json(CONTEXT_SYNC_PATH)
 
     if scenario_trigger is None:
         result = no_valid_output("SCENARIO_TRIGGER_MISSING")
     else:
         try:
-            result = compute_trade_plan(scenario_trigger, setup_context, flow_state, evidence, persistence)
+            result = compute_trade_plan(
+                scenario_trigger, setup_context, flow_state, evidence, persistence,
+                depth_memory=depth_memory, context_sync=context_sync,
+            )
         except Exception:
             result = no_valid_output("COMPUTE_ERROR")
 

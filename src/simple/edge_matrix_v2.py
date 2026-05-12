@@ -33,6 +33,13 @@ REPORT_PATH = REPORTS_DIR / "s22_edge_matrix_v2_latest_report.md"
 MIN_REQUIRED_SAMPLE = 30
 ROBUST_SAMPLE_THRESHOLD = 100
 
+SAMPLE_THRESHOLDS = {
+    "early_signal":      20,
+    "medium_confidence": 50,
+    "strong_confidence": 100,
+    "robust_edge":       200,
+}
+
 SAFETY = {
     "safe_to_open_real_trade": False,
     "private_api_used": False,
@@ -135,6 +142,14 @@ def _classify_record(rec: dict[str, Any]) -> dict[str, Any]:
         or "UNKNOWN"
     )
 
+    # Lineage-based fields
+    lineage = rec.get("lineage") or {}
+    setup_grade     = str(lineage.get("source_setup_grade") or "UNKNOWN")
+    liquidity_bias  = str(lineage.get("source_liquidity_bias") or "UNKNOWN")
+    wall_conclusion = str(lineage.get("source_wall_lifecycle") or "UNKNOWN")
+    trigger_strength = _safe_float(lineage.get("source_trigger_strength")) or 0.0
+    hold_time_seconds = _safe_float(rec.get("hold_time_seconds")) or 0.0
+
     return {
         "status": status,
         "result": result,
@@ -142,6 +157,7 @@ def _classify_record(rec: dict[str, Any]) -> dict[str, Any]:
         "realized_r": realized_r,
         "mfe_r": mfe_r,
         "mae_r": mae_r,
+        "hold_time_seconds": hold_time_seconds,
         "closed": closed,
         "is_open": is_open,
         "no_lifecycle": no_lifecycle,
@@ -153,6 +169,10 @@ def _classify_record(rec: dict[str, Any]) -> dict[str, Any]:
         "scenario_label": scenario_label or "UNKNOWN",
         "decision": decision_label or "UNKNOWN",
         "final_grade": final_grade or "UNKNOWN",
+        "setup_grade": setup_grade,
+        "liquidity_bias": liquidity_bias,
+        "wall_conclusion": wall_conclusion,
+        "trigger_strength": trigger_strength,
     }
 
 
@@ -230,6 +250,17 @@ def _group_stats(items: list[dict[str, Any]]) -> dict[str, Any]:
         "win_rate": win_rate,
         "avg_realized_r": avg_r,
         "expectancy_r": expectancy,
+    }
+
+
+def _mae_mfe_stats(items: list[dict[str, Any]]) -> dict[str, Any]:
+    maes = [i["mae_r"] for i in items if i.get("mae_r") is not None]
+    mfes = [i["mfe_r"] for i in items if i.get("mfe_r") is not None]
+    return {
+        "avg_mae_r": round(sum(maes) / len(maes), 4) if maes else None,
+        "avg_mfe_r": round(sum(mfes) / len(mfes), 4) if mfes else None,
+        "max_mfe_r": round(max(mfes), 4) if mfes else None,
+        "max_mae_r": round(max(maes), 4) if maes else None,
     }
 
 
@@ -373,11 +404,15 @@ def build_edge_matrix(
     assert sample_status in ALLOWED_SAMPLE_STATUS
 
     overall = _compute_overall(classified)
-    by_side = _group_by(classified, "side")
-    by_grade = _group_by(classified, "final_grade")
-    by_setup = _group_by(classified, "setup_context_label")
-    by_scenario = _group_by(classified, "scenario_label")
-    by_decision = _group_by(classified, "decision")
+    mae_mfe = _mae_mfe_stats(classified)
+    by_side       = _group_by(classified, "side")
+    by_grade      = _group_by(classified, "final_grade")
+    by_setup      = _group_by(classified, "setup_context_label")
+    by_scenario   = _group_by(classified, "scenario_label")
+    by_decision   = _group_by(classified, "decision")
+    by_setup_grade   = _group_by(classified, "setup_grade")
+    by_liquidity     = _group_by(classified, "liquidity_bias")
+    by_wall          = _group_by(classified, "wall_conclusion")
 
     edge_quality = _edge_quality(usable_closed, overall)
     assert edge_quality["edge_status"] in ALLOWED_EDGE_STATUS
@@ -385,16 +420,19 @@ def build_edge_matrix(
     best_setup, worst_setup = _best_worst(by_setup)
     best_scenario, worst_scenario = _best_worst(by_scenario)
     best_grade, worst_grade = _best_worst(by_grade)
+    best_liquidity, worst_liquidity = _best_worst(by_liquidity)
 
     best_observed = {
         "by_setup_context": best_setup,
         "by_scenario_label": best_scenario,
         "by_grade": best_grade,
+        "by_liquidity": best_liquidity,
     }
     worst_observed = {
         "by_setup_context": worst_setup,
         "by_scenario_label": worst_scenario,
         "by_grade": worst_grade,
+        "by_liquidity": worst_liquidity,
     }
 
     limitations: list[str] = []
@@ -462,11 +500,15 @@ def build_edge_matrix(
         "input_status": input_status,
         "sample_summary": sample_summary,
         "overall_stats": overall,
+        "mae_mfe_stats": mae_mfe,
         "by_side": by_side,
         "by_grade": by_grade,
         "by_setup_context": by_setup,
         "by_scenario_label": by_scenario,
         "by_decision": by_decision,
+        "by_setup_grade": by_setup_grade,
+        "by_liquidity_bias": by_liquidity,
+        "by_wall_conclusion": by_wall,
         "edge_quality": edge_quality,
         "best_observed_conditions": best_observed,
         "worst_observed_conditions": worst_observed,

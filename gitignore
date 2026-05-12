@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# Runtime data — gitignore (VPS'te kendi uretir)
+data/simple/*.jsonl
+state/simple/*.json
+reports/simple/*.md
+
+# Buyuk log dosyalari
+*.log
+logs/
+
+# Secrets
+.env
+*.env
+secrets.py
+telegram_config.py
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Klasorler olustur ama icini ignore et
+!data/simple/.gitkeep
+!state/simple/.gitkeep
+!reports/simple/.gitkeep

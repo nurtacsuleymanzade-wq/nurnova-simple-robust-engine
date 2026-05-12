@@ -18,7 +18,14 @@ S14_STATE_PATH = STATE_DIR / "s14_flow_persistence_state.json"
 PERSISTENCE_LOG_PATH = DATA_DIR / "flow_persistence.jsonl"
 REPORT_PATH = REPORTS_DIR / "s14_flow_persistence_latest_report.md"
 
-WINDOW_SECONDS = {"last_5s": 5, "last_15s": 15, "last_30s": 30}
+WINDOW_SECONDS = {
+    "last_30s": 30,
+    "last_60s": 60,
+    "last_3m":  180,
+    "last_5m":  300,
+    "last_10m": 600,
+    "last_15m": 900,
+}
 
 
 def _now_utc() -> str:
@@ -106,40 +113,43 @@ def _compute_window(entries: list[dict[str, Any]], ref_time: datetime, window_se
 
 
 def _persistence_label(windows: dict[str, dict]) -> str:
-    w5 = windows["last_5s"]
-    w15 = windows["last_15s"]
     w30 = windows["last_30s"]
+    w60 = windows["last_60s"]
+    w3m = windows["last_3m"]
+    w5m = windows["last_5m"]
+    w10m = windows["last_10m"]
+    w15m = windows["last_15m"]
 
-    if w5["sample_count"] == 0 and w15["sample_count"] == 0 and w30["sample_count"] == 0:
+    all_zero = all(windows[k]["sample_count"] == 0 for k in windows)
+    if all_zero:
         return "NO_VALID_FLOW"
 
-    if w5["sample_count"] < 2:
+    if w5m["sample_count"] < 5:
         return "INSUFFICIENT_HISTORY"
 
-    s5 = w5["avg_evidence_score"]
-    s15 = w15["avg_evidence_score"]
-    s30 = w30["avg_evidence_score"]
-    d5 = w5["dominant_label"]
-    d30 = w30["dominant_label"]
-    c5 = w5["direction_consistency"]
-    c15 = w15["direction_consistency"]
-    c30 = w30["direction_consistency"]
+    s30  = w30["avg_evidence_score"]
+    s5m  = w5m["avg_evidence_score"]
+    s15m = w15m["avg_evidence_score"]
 
-    all_long = d5 == "LONG" and w15["dominant_label"] == "LONG" and d30 == "LONG"
-    all_short = d5 == "SHORT" and w15["dominant_label"] == "SHORT" and d30 == "SHORT"
-    avg_consistency = (c5 + c15 + c30) / 3.0
+    long5m  = s5m > 2.0  and w5m["direction_consistency"] > 0.6
+    short5m = s5m < -2.0 and w5m["direction_consistency"] > 0.6
+    long15m  = w15m["sample_count"] > 10 and s15m > 1.5
+    short15m = w15m["sample_count"] > 10 and s15m < -1.5
 
-    if d30 == "LONG" and s30 > 2.0 and s5 < s30 - 1.5 and s5 > -1.0:
-        return "FADING_LONG_PRESSURE"
-
-    if d30 == "SHORT" and s30 < -2.0 and s5 > s30 + 1.5 and s5 < 1.0:
-        return "FADING_SHORT_PRESSURE"
-
-    if all_long and s5 > 2.0 and avg_consistency >= 0.6:
+    if long5m and long15m:
         return "SUSTAINED_LONG_PRESSURE"
-
-    if all_short and s5 < -2.0 and avg_consistency >= 0.6:
+    if short5m and short15m:
         return "SUSTAINED_SHORT_PRESSURE"
+
+    if s30 > 3.0 and long5m:
+        return "BUILDING_LONG_MOMENTUM"
+    if s30 < -3.0 and short5m:
+        return "BUILDING_SHORT_MOMENTUM"
+
+    if long15m and not long5m:
+        return "FADING_LONG_PRESSURE"
+    if short15m and not short5m:
+        return "FADING_SHORT_PRESSURE"
 
     return "CHOPPY_FLOW"
 
@@ -155,35 +165,37 @@ def _direction_label(persistence_score: float) -> str:
 def _continuation_quality(windows: dict[str, dict], label: str) -> str:
     if label in ("INSUFFICIENT_HISTORY", "NO_VALID_FLOW", "CHOPPY_FLOW"):
         return "NONE"
-    consistencies = [windows[w]["direction_consistency"] for w in windows if windows[w]["sample_count"] > 0]
-    if not consistencies:
-        return "NONE"
-    avg_c = sum(consistencies) / len(consistencies)
-    if avg_c >= 0.8:
-        return "STRONG"
-    if avg_c >= 0.6:
-        return "MODERATE"
-    if avg_c >= 0.4:
+    if label in ("FADING_LONG_PRESSURE", "FADING_SHORT_PRESSURE"):
+        return "FADING"
+    if label in ("SUSTAINED_LONG_PRESSURE", "SUSTAINED_SHORT_PRESSURE"):
+        c15m = windows["last_15m"]["direction_consistency"]
+        n15m = windows["last_15m"]["sample_count"]
+        if n15m >= 10 and c15m >= 0.70:
+            return "SUSTAINED"
+        if c15m >= 0.55:
+            return "MODERATE"
         return "WEAK"
+    if label in ("BUILDING_LONG_MOMENTUM", "BUILDING_SHORT_MOMENTUM"):
+        return "BUILDING"
     return "NONE"
 
 
 def _decay_risk(windows: dict[str, dict], label: str) -> bool:
     if label in ("FADING_LONG_PRESSURE", "FADING_SHORT_PRESSURE"):
         return True
-    w5 = windows["last_5s"]
     w30 = windows["last_30s"]
-    if w5["sample_count"] < 1 or w30["sample_count"] < 1:
+    w15m = windows["last_15m"]
+    if w30["sample_count"] < 1 or w15m["sample_count"] < 1:
         return False
-    return abs(w5["avg_evidence_score"]) < abs(w30["avg_evidence_score"]) - 2.0
+    return abs(w30["avg_evidence_score"]) < abs(w15m["avg_evidence_score"]) - 2.0
 
 
 def _flip_risk(windows: dict[str, dict]) -> bool:
-    d5 = windows["last_5s"]["dominant_label"]
     d30 = windows["last_30s"]["dominant_label"]
-    if d5 == "NEUTRAL" or d30 == "NEUTRAL":
+    d15m = windows["last_15m"]["dominant_label"]
+    if d30 == "NEUTRAL" or d15m == "NEUTRAL":
         return False
-    return d5 != d30
+    return d30 != d15m
 
 
 def _data_quality(entries_30s: int, total_entries: int) -> dict[str, Any]:
@@ -228,13 +240,13 @@ def compute_flow_persistence(
 
     plabel = _persistence_label(windows)
 
-    w5 = windows["last_5s"]
-    w15 = windows["last_15s"]
-    w30 = windows["last_30s"]
-    counts = [w["sample_count"] for w in [w5, w15, w30] if w["sample_count"] > 0]
+    w30  = windows["last_30s"]
+    w5m  = windows["last_5m"]
+    w15m = windows["last_15m"]
+    counts = [w["sample_count"] for w in [w30, w5m, w15m] if w["sample_count"] > 0]
     if counts:
         persistence_score = _clamp(
-            round((w5["avg_evidence_score"] * 0.5 + w15["avg_evidence_score"] * 0.3 + w30["avg_evidence_score"] * 0.2), 4),
+            round((w30["avg_evidence_score"] * 0.1 + w5m["avg_evidence_score"] * 0.3 + w15m["avg_evidence_score"] * 0.6), 4),
             -10.0,
             10.0,
         )
@@ -305,11 +317,7 @@ def no_valid_flow_output(reason: str) -> dict[str, Any]:
         "symbol": "UNKNOWN",
         "source": "NONE",
         "input_status": "MISSING",
-        "windows": {
-            "last_5s": dict(empty_window),
-            "last_15s": dict(empty_window),
-            "last_30s": dict(empty_window),
-        },
+        "windows": {k: dict(empty_window) for k in WINDOW_SECONDS},
         "persistence_score": 0.0,
         "persistence_label": "NO_VALID_FLOW",
         "direction_label": "UNKNOWN",
@@ -364,9 +372,6 @@ def run_flow_persistence_engine() -> dict[str, Any]:
 
 
 def _write_report(r: dict[str, Any]) -> None:
-    w5 = r["windows"]["last_5s"]
-    w15 = r["windows"]["last_15s"]
-    w30 = r["windows"]["last_30s"]
     lines = [
         "# S14 Flow Persistence Engine — Latest Report",
         "",
@@ -381,11 +386,14 @@ def _write_report(r: dict[str, Any]) -> None:
         f"**Flip Risk:** {r['flip_risk']}",
         "",
         "## Windows",
-        f"| Window | Samples | Avg Score | Dominant | Consistency |",
-        f"|--------|---------|-----------|----------|-------------|",
-        f"| last_5s | {w5['sample_count']} | {w5['avg_evidence_score']} | {w5['dominant_label']} | {w5['direction_consistency']} |",
-        f"| last_15s | {w15['sample_count']} | {w15['avg_evidence_score']} | {w15['dominant_label']} | {w15['direction_consistency']} |",
-        f"| last_30s | {w30['sample_count']} | {w30['avg_evidence_score']} | {w30['dominant_label']} | {w30['direction_consistency']} |",
+        "| Window | Samples | Avg Score | Dominant | Consistency |",
+        "|--------|---------|-----------|----------|-------------|",
+    ]
+    for wname, wdata in r["windows"].items():
+        lines.append(
+            f"| {wname} | {wdata['sample_count']} | {wdata['avg_evidence_score']} | {wdata['dominant_label']} | {wdata['direction_consistency']} |"
+        )
+    lines += [
         "",
         f"**Data Quality:** {r['data_quality']['level']} ({r['data_quality']['score']})",
         f"**Reason Codes:** {', '.join(r['reason_codes'])}",

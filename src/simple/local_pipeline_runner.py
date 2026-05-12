@@ -36,6 +36,9 @@ _STAGES: list[tuple[str, str, str]] = [
     ("src.simple.liquidity_structure_engine",     "LIVE_S5",         "S5_LIQUIDITY_STRUCTURE_CONTEXT"),
     # --- Setup katmani ---
     ("src.simple.setup_candidate_engine",         "LIVE_S6",         "S6_SCENARIO_SETUP_CANDIDATE"),
+    # --- Depth katmani (S27-S27B) ---
+    ("src.simple.run_s27_depth_liquidity_memory", "NOARG_MAIN", "S27_DEPTH_LIQUIDITY_MEMORY"),
+    ("src.simple.run_s27b_wall_lifecycle",        "NOARG_MAIN", "S27B_WALL_LIFECYCLE"),
     # --- Flow katmani (S13-S15) ---
     ("src.simple.flow_evidence_engine",           "NOARG",           "S13_FLOW_EVIDENCE"),
     ("src.simple.flow_persistence_engine",        "NOARG",           "S14_FLOW_PERSISTENCE"),
@@ -110,6 +113,21 @@ def _run_stage(module_path: str, func_name: str, symbol: str) -> tuple[dict[str,
         return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
 
 
+def _run_noarg_main_stage(module_path: str) -> tuple[dict[str, Any] | None, float, str | None]:
+    """module.main() cagrilir, stdout JSON parse edilir."""
+    t0 = time.monotonic()
+    try:
+        mod = importlib.import_module(module_path)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            mod.main()
+        raw = buf.getvalue().strip()
+        output = json.loads(raw) if raw else None
+        return output, round((time.monotonic() - t0) * 1000, 1), None
+    except Exception as exc:
+        return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
+
+
 def _run_noarg_stage(module_path: str) -> tuple[dict[str, Any] | None, float, str | None]:
     """Argumansiz engine fonksiyonlarini calistir."""
     t0 = time.monotonic()
@@ -130,12 +148,49 @@ def _run_noarg_stage(module_path: str) -> tuple[dict[str, Any] | None, float, st
 
 
 def run_pipeline(symbol: str, source_mode: str = "LIVE") -> dict[str, Any]:
-    """Execute S1-S22 sequentially."""
+    """Execute S0 context sync + S1-S22 sequentially."""
     block_results: list[dict[str, Any]] = []
     blocks_passed = 0
     blocks_failed = 0
     pipeline_status = "COMPLETE"
     stop_reason: str | None = None
+    context_id = "CTX_UNKNOWN"
+    sync_status = "UNKNOWN"
+
+    # S0: Context Sync - pipeline basinda her zaman calistir
+    try:
+        from src.simple.context_sync_engine import run_context_sync
+        t0_sync = time.monotonic()
+        sync_result = run_context_sync()
+        sync_ms = round((time.monotonic() - t0_sync) * 1000, 1)
+        context_id = sync_result.get("context_id", "CTX_UNKNOWN")
+        sync_status = sync_result.get("sync_status", "UNKNOWN")
+        block_results.append({
+            "block_id":    "S0_CONTEXT_SYNC",
+            "status":      "PASSED" if sync_result.get("pipeline_ready") else "DEGRADED",
+            "runtime_ms":  sync_ms,
+            "context_id":  context_id,
+            "sync_status": sync_status,
+            "error":       None,
+        })
+        if sync_result.get("pipeline_ready"):
+            blocks_passed += 1
+        else:
+            blocks_failed += 1
+        # SYNC_BROKEN pipeline'i durdurmaz — sadece reason_code ekler
+        # Pipeline calisinca dosyalar guncellenir, sonraki sync OK olur
+        if sync_status == "SYNC_BROKEN":
+            pass  # devam et, warn zaten block_results'ta var
+    except Exception as exc:
+        block_results.append({
+            "block_id":    "S0_CONTEXT_SYNC",
+            "status":      "DEGRADED",
+            "runtime_ms":  0.0,
+            "context_id":  context_id,
+            "sync_status": "ERROR",
+            "error":       str(exc)[:200],
+        })
+        blocks_failed += 1
 
     for module_path, func_name, fallback_label in _STAGES:
         # Dogru cagri yontemini sec
@@ -151,6 +206,8 @@ def run_pipeline(symbol: str, source_mode: str = "LIVE") -> dict[str, Any]:
             output, runtime_ms, exc_str = _run_live_s5_direct(symbol)
         elif func_name == "LIVE_S6":
             output, runtime_ms, exc_str = _run_live_s6_direct(symbol)
+        elif func_name == "NOARG_MAIN":
+            output, runtime_ms, exc_str = _run_noarg_main_stage(module_path)
         elif func_name == "NOARG":
             output, runtime_ms, exc_str = _run_noarg_stage(module_path)
         else:
@@ -216,6 +273,8 @@ def run_pipeline(symbol: str, source_mode: str = "LIVE") -> dict[str, Any]:
         "SOURCE_FLOW_STATE_LIVE",
         f"SYMBOL_{symbol}",
         f"PIPELINE_{pipeline_status}",
+        f"SYNC_{sync_status}",
+        f"CONTEXT_{context_id}",
         f"BLOCKS_PASSED_{blocks_passed}",
         f"BLOCKS_FAILED_{blocks_failed}",
         "SAFE_TO_OPEN_REAL_TRADE_FALSE",
@@ -237,6 +296,8 @@ def run_pipeline(symbol: str, source_mode: str = "LIVE") -> dict[str, Any]:
         "block_id": BLOCK_ID,
         "symbol": symbol,
         "source": {"source_mode": "FLOW_STATE_LIVE"},
+        "context_id": context_id,
+        "sync_status": sync_status,
         "execution_summary": {
             "blocks_total": len(_STAGES),
             "blocks_passed": blocks_passed,

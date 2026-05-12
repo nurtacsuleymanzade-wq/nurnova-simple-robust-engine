@@ -56,6 +56,10 @@ def print_summary(data: dict, cycle: int) -> None:
     es = data.get("execution_summary", {})
     dq = data.get("data_quality", {})
 
+    ctx_id = data.get("context_id", "?")
+    sync_st = data.get("sync_status", "?")
+    print(f"  Context  : {ctx_id}")
+    print(f"  Sync     : {sync_st}")
     print(f"  Pipeline : {es.get('pipeline_status', '?')}")
     print(f"  Bloklar  : {es.get('blocks_passed', 0)}/{es.get('blocks_total', 0)} PASSED")
     print(f"  Veri     : {dq.get('level', '?')} (skor={dq.get('score', 0)})")
@@ -87,16 +91,6 @@ def print_summary(data: dict, cycle: int) -> None:
         print(f"  Setup    : {status} | {direction} | Grade={grade} | skor={score} | {align} | risk={risk} | src={src_mode}")
     else:
         print(f"  Setup    : (dosya yok)")
-
-    # --- Setup context probability ---
-    sc_ctx = _read_json(STATE_DIR / "latest_setup_context.json")
-    if sc_ctx:
-        prob = sc_ctx.get("probability_summary") or {}
-        long_pct  = prob.get("long_probability_pct", "?")
-        short_pct = prob.get("short_probability_pct", "?")
-        sig_class = prob.get("signal_class", "?")
-        eligible  = prob.get("signal_eligible", False)
-        print(f"  Olasılık : LONG={long_pct}% SHORT={short_pct}% | Sınıf={sig_class} | Sinyal={'✓' if eligible else '✗'}")
 
     # --- Trade Plan ---
     tp = _read_json(STATE_DIR / "latest_trade_plan.json")
@@ -140,12 +134,12 @@ def print_summary(data: dict, cycle: int) -> None:
         print(f"  Edge     : (DEGRADED)")
 
     # --- Kapanan trade ---
-    for fname in ("closed_outcomes_with_lineage.jsonl", "closed_paper_outcomes.jsonl", "paper_outcome.jsonl"):
+    for fname in ("paper_outcome.jsonl", "closed_paper_outcomes.jsonl"):
         closed_path = DATA_DIR / fname
         if closed_path.exists():
             try:
                 lines = [l for l in closed_path.read_text(encoding="utf-8").splitlines() if l.strip()]
-                print(f"  Kapanan  : {len(lines)} trade ({fname})")
+                print(f"  Kapanan  : {len(lines)} trade")
             except Exception:
                 pass
             break

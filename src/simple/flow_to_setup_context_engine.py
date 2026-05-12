@@ -235,6 +235,8 @@ def compute_setup_context(
     if not tradeable:
         reason_codes.append("NOT_TRADEABLE")
 
+    prob_summary = _confidence_to_probability(confidence, direction, continuation_quality)
+
     return {
         "timestamp_utc": ts,
         "block_id": "S15_FLOW_TO_SETUP_CONTEXT",
@@ -247,6 +249,7 @@ def compute_setup_context(
         "long_probability": long_prob,
         "short_probability": short_prob,
         "confidence": confidence,
+        "probability_summary": prob_summary,
         "tradeable": tradeable,
         "context_reason": context_reason,
         "data_quality": {"level": combined_dq_level, "score": combined_dq_score},
@@ -259,6 +262,51 @@ def compute_setup_context(
             "private_api_used": False,
             "live_order_sent": False,
         },
+    }
+
+
+def _confidence_to_probability(confidence: float, direction: str, continuation_quality: str = "NONE") -> dict[str, Any]:
+    base_prob = 50.0 + (max(0.0, min(1.0, confidence)) * 45.0)
+
+    quality_adj = {
+        "SUSTAINED": +5.0,
+        "BUILDING":  +2.0,
+        "MODERATE":  +1.0,
+        "WEAK":       0.0,
+        "NONE":       0.0,
+        "FADING":    -5.0,
+    }.get(continuation_quality, 0.0)
+
+    base_prob = max(50.0, min(95.0, base_prob + quality_adj))
+
+    if direction == "LONG":
+        long_prob  = round(base_prob, 1)
+        short_prob = round(100.0 - base_prob, 1)
+    elif direction == "SHORT":
+        short_prob = round(base_prob, 1)
+        long_prob  = round(100.0 - base_prob, 1)
+    else:
+        long_prob  = 50.0
+        short_prob = 50.0
+
+    if base_prob >= 85:
+        signal_class = "A_PLUS"
+    elif base_prob >= 75:
+        signal_class = "A"
+    elif base_prob >= 65:
+        signal_class = "B"
+    elif base_prob >= 60:
+        signal_class = "C"
+    else:
+        signal_class = "NO_SIGNAL"
+
+    return {
+        "long_probability_pct": long_prob,
+        "short_probability_pct": short_prob,
+        "signal_class": signal_class,
+        "signal_eligible": base_prob >= 60.0,
+        "confidence_raw": round(confidence, 4),
+        "base_probability": round(base_prob, 1),
     }
 
 

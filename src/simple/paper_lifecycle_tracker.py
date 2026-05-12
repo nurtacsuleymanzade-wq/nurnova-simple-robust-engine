@@ -15,10 +15,15 @@ STATE_DIR = Path("state/simple")
 DATA_DIR = Path("data/simple")
 REPORTS_DIR = Path("reports/simple")
 
-DECISION_GATE_PATH = STATE_DIR / "latest_decision_gate.json"
-TRADE_PLAN_PATH = STATE_DIR / "latest_trade_plan.json"
-ALERT_PATH = STATE_DIR / "latest_telegram_paper_alert.json"
-FLOW_STATE_PATH = STATE_DIR / "latest_flow_state.json"
+DECISION_GATE_PATH    = STATE_DIR / "latest_decision_gate.json"
+TRADE_PLAN_PATH       = STATE_DIR / "latest_trade_plan.json"
+ALERT_PATH            = STATE_DIR / "latest_telegram_paper_alert.json"
+FLOW_STATE_PATH       = STATE_DIR / "latest_flow_state.json"
+CONTEXT_SYNC_PATH     = STATE_DIR / "latest_context_sync.json"
+SCENARIO_TRIGGER_PATH = STATE_DIR / "latest_scenario_trigger.json"
+SETUP_CANDIDATE_PATH  = STATE_DIR / "latest_setup_candidate.json"
+DEPTH_MEMORY_PATH     = STATE_DIR / "latest_depth_liquidity_memory.json"
+WALL_LIFECYCLE_PATH   = STATE_DIR / "latest_wall_lifecycle.json"
 
 LIFECYCLE_PATH = STATE_DIR / "latest_paper_lifecycle.json"
 S20_STATE_PATH = STATE_DIR / "s20_paper_lifecycle_state.json"
@@ -164,6 +169,11 @@ def compute_paper_lifecycle(
     alert: dict[str, Any] | None,
     flow_state: dict[str, Any] | None,
     prior: dict[str, Any] | None = None,
+    context_sync: dict[str, Any] | None = None,
+    scenario_trigger: dict[str, Any] | None = None,
+    setup_candidate: dict[str, Any] | None = None,
+    depth_memory: dict[str, Any] | None = None,
+    wall_lifecycle: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ts = _utc_now()
     symbol = (decision_gate or {}).get("symbol") or (alert or {}).get("symbol") or "UNKNOWN"
@@ -322,6 +332,20 @@ def compute_paper_lifecycle(
 
     assert lifecycle_status in ALLOWED_LIFECYCLE_STATUS
 
+    # Build lineage — birth_timestamp from prior if continuing, else now
+    birth_ts = (prior or {}).get("lineage", {}).get("birth_timestamp") or ts
+    lineage = {
+        "context_id": (context_sync or {}).get("context_id"),
+        "source_scenario_id": (scenario_trigger or {}).get("scenario_label"),
+        "source_setup_status": ((setup_candidate or {}).get("setup_candidate") or {}).get("setup_status"),
+        "source_setup_grade": ((setup_candidate or {}).get("setup_candidate") or {}).get("setup_grade"),
+        "source_trigger_strength": (scenario_trigger or {}).get("trigger_strength"),
+        "source_confidence": (scenario_trigger or {}).get("trigger_confidence"),
+        "source_liquidity_bias": (depth_memory or {}).get("liquidity_bias"),
+        "source_wall_lifecycle": ((wall_lifecycle or {}).get("liquidity_intelligence") or {}).get("dominant_real_side"),
+        "birth_timestamp": birth_ts,
+    }
+
     reason_codes = [
         f"SYMBOL_{symbol}",
         f"SIDE_{side}",
@@ -371,6 +395,7 @@ def compute_paper_lifecycle(
         "max_favorable_excursion_r": round(mfe, 4),
         "max_adverse_excursion_r": round(mae, 4),
         "lifecycle_events": events,
+        "lineage": lineage,
         "data_quality": dq,
         "reason_codes": reason_codes,
         "feeds_next": FEEDS_NEXT,
@@ -383,13 +408,21 @@ def run_paper_lifecycle_tracker() -> dict[str, Any]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    decision_gate = _load_json(DECISION_GATE_PATH)
-    trade_plan = _load_json(TRADE_PLAN_PATH)
-    alert = _load_json(ALERT_PATH)
-    flow_state = _load_json(FLOW_STATE_PATH)
-    prior = _load_json(LIFECYCLE_PATH)
+    decision_gate    = _load_json(DECISION_GATE_PATH)
+    trade_plan       = _load_json(TRADE_PLAN_PATH)
+    alert            = _load_json(ALERT_PATH)
+    flow_state       = _load_json(FLOW_STATE_PATH)
+    prior            = _load_json(LIFECYCLE_PATH)
+    context_sync     = _load_json(CONTEXT_SYNC_PATH)
+    scenario_trigger = _load_json(SCENARIO_TRIGGER_PATH)
+    setup_candidate  = _load_json(SETUP_CANDIDATE_PATH)
+    depth_memory     = _load_json(DEPTH_MEMORY_PATH)
+    wall_lifecycle   = _load_json(WALL_LIFECYCLE_PATH)
 
-    result = compute_paper_lifecycle(decision_gate, trade_plan, alert, flow_state, prior)
+    result = compute_paper_lifecycle(
+        decision_gate, trade_plan, alert, flow_state, prior,
+        context_sync, scenario_trigger, setup_candidate, depth_memory, wall_lifecycle,
+    )
 
     _atomic_write(LIFECYCLE_PATH, json.dumps(result, indent=2))
 

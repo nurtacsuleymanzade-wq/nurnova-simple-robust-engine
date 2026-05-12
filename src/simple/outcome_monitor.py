@@ -26,6 +26,7 @@ SCENARIO_TRIGGER_PATH = STATE_DIR / "latest_scenario_trigger.json"
 OUTCOME_PATH = STATE_DIR / "latest_outcome_monitor.json"
 S21_STATE_PATH = STATE_DIR / "s21_outcome_monitor_state.json"
 HISTORY_PATH = DATA_DIR / "outcome_monitor_history.jsonl"
+LINEAGE_HISTORY_PATH = DATA_DIR / "closed_outcomes_with_lineage.jsonl"
 REPORT_PATH = REPORTS_DIR / "s21_outcome_monitor_latest_report.md"
 
 ALLOWED_OUTCOME_STATUS = {"OPEN", "CLOSED", "NO_OUTCOME", "INVALID"}
@@ -330,6 +331,20 @@ def compute_outcome(
     assert outcome_status in ALLOWED_OUTCOME_STATUS
     assert outcome_result in ALLOWED_OUTCOME_RESULT
 
+    # Hold time
+    birth_ts = (lifecycle.get("lineage") or {}).get("birth_timestamp")
+    hold_time_seconds: float | None = None
+    if birth_ts:
+        try:
+            birth_dt = datetime.strptime(birth_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            now_dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            hold_time_seconds = round((now_dt - birth_dt).total_seconds(), 1)
+        except Exception:
+            pass
+
+    # Lineage from lifecycle
+    lineage = dict(lifecycle.get("lineage") or {})
+
     # Data quality from lifecycle
     lc_dq = lifecycle.get("data_quality") or {}
     dq = {
@@ -379,6 +394,8 @@ def compute_outcome(
         "realized_r": realized_r,
         "mfe_r": round(mfe, 4),
         "mae_r": round(mae, 4),
+        "hold_time_seconds": hold_time_seconds,
+        "lineage": lineage,
         "close_reason": close_reason,
         "setup_context_snapshot": _setup_snap(setup_context),
         "scenario_trigger_snapshot": _scenario_snap(scenario_trigger),
@@ -422,6 +439,10 @@ def run_outcome_monitor() -> dict[str, Any]:
 
     with HISTORY_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(result) + "\n")
+
+    if result.get("outcome_status") == "CLOSED":
+        with LINEAGE_HISTORY_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(result) + "\n")
 
     _write_report(result)
     return result
