@@ -49,6 +49,7 @@ def test_absorption_output_fields_present():
     assert result["absorption_detected"] is True
     assert result["reversal_bias"] == "SHORT"
     assert "absorption_strength" in result
+    assert result["timeframe"] == "1m"
 
 
 def test_missing_input_returns_no_valid_output():
@@ -56,6 +57,7 @@ def test_missing_input_returns_no_valid_output():
     assert result["input_status"] == "MISSING"
     assert result["absorption_detected"] is False
     assert "TEST_MISSING" in result["reason_codes"]
+    assert result["candle_close_time"] == "UNKNOWN"
 
 
 def test_absorption_threshold_triggers_correctly():

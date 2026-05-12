@@ -149,6 +149,11 @@ def compute_candle_quality(
         "delta_aligned": delta_aligned,
         "fake_move_probability": fake_move_probability,
         "candle_quality": candle_quality,
+        "timeframe": "1m",
+        "candle_close_time": (
+            (market_truth.get("official_candle") or {}).get("close_time_utc")
+            or evidence.get("timestamp_utc", "UNKNOWN")
+        ),
         "reason_codes": reason_codes,
         "data_quality": {"level": dq_level, "score": dq_score},
         "feeds_next": {"next_blocks": ["S6_SCENARIO_SETUP_CANDIDATE", "S18_DECISION_GATE"]},
@@ -174,6 +179,8 @@ def no_valid_output(reason: str) -> dict[str, Any]:
         "delta_aligned": False,
         "fake_move_probability": 0.0,
         "candle_quality": "UNKNOWN",
+        "timeframe": "1m",
+        "candle_close_time": "UNKNOWN",
         "reason_codes": [
             "INPUT_MISSING",
             reason,

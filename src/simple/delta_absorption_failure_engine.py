@@ -112,6 +112,8 @@ def compute_delta_absorption_failure(
         "aggressive_side_failed": aggressive_side_failed,
         "reversal_bias": reversal_bias,
         "failure_strength": failure_strength,
+        "timeframe": "1m",
+        "candle_close_time": evidence.get("timestamp_utc", "UNKNOWN"),
         "reason_codes": reason_codes,
         "data_quality": {"level": dq_level, "score": dq_score},
         "feeds_next": {"next_blocks": ["S15_FLOW_TO_SETUP_CONTEXT", "S18_DECISION_GATE"]},
@@ -135,6 +137,8 @@ def no_valid_output(reason: str) -> dict[str, Any]:
         "aggressive_side_failed": "NONE",
         "reversal_bias": "NEUTRAL",
         "failure_strength": 0.0,
+        "timeframe": "1m",
+        "candle_close_time": "UNKNOWN",
         "reason_codes": [
             "INPUT_MISSING",
             reason,

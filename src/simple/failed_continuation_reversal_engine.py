@@ -118,6 +118,8 @@ def compute_failed_continuation_reversal(persistence: dict[str, Any]) -> dict[st
         "trapped_side": trapped_side,
         "reversal_ready": reversal_ready,
         "trap_strength": trap_strength,
+        "timeframe": "1m",
+        "candle_close_time": persistence.get("timestamp_utc", "UNKNOWN"),
         "reason_codes": reason_codes,
         "data_quality": dq,
         "feeds_next": {"next_blocks": ["S15_FLOW_TO_SETUP_CONTEXT", "S18_DECISION_GATE"]},
@@ -141,6 +143,8 @@ def no_valid_output(reason: str) -> dict[str, Any]:
         "trapped_side": "NONE",
         "reversal_ready": False,
         "trap_strength": 0.0,
+        "timeframe": "1m",
+        "candle_close_time": "UNKNOWN",
         "reason_codes": [
             "INPUT_MISSING",
             reason,

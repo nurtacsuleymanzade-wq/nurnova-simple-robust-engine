@@ -12,6 +12,7 @@ AR01_PATH = STATE_DIR / "latest_ar01.json"
 DAF_PATH = STATE_DIR / "latest_daf.json"
 FCR_PATH = STATE_DIR / "latest_fcr.json"
 CQE_PATH = STATE_DIR / "latest_cqe.json"
+MARKET_TRUTH_PATH = STATE_DIR / "latest_market_truth.json"
 MODEL_REGISTRY_PATH = STATE_DIR / "latest_model_registry.json"
 MODEL_REGISTRY_LOG_PATH = DATA_DIR / "model_registry_history.jsonl"
 
@@ -33,11 +34,24 @@ def _load_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _candle_close_time(market_truth: dict[str, Any] | None) -> str:
+    if not market_truth:
+        return "UNKNOWN"
+    return (
+        market_truth.get("candle_close_time")
+        or (market_truth.get("market_truth") or {}).get("candle_close_time")
+        or market_truth.get("timestamp_utc")
+        or (market_truth.get("official_candle") or {}).get("close_time_utc")
+        or "UNKNOWN"
+    )
+
+
 def compute_model_registry(
     ar01: dict[str, Any] | None,
     daf: dict[str, Any] | None,
     fcr: dict[str, Any] | None,
     cqe: dict[str, Any] | None,
+    market_truth: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     active_signals: list[dict[str, Any]] = []
 
@@ -46,12 +60,18 @@ def compute_model_registry(
             "model": "AR01",
             "bias": ar01["reversal_bias"],
             "strength": float(ar01.get("reversal_probability", 0.0)),
+            "timeframe": "1m",
+            "trigger_reason": f"ABSORPTION_{ar01.get('aggressor_side', 'UNKNOWN')}_TRAPPED",
+            "timestamp": ar01.get("timestamp_utc", "UNKNOWN"),
         })
     if daf and daf.get("delta_divergence") and daf.get("reversal_bias") in ("LONG", "SHORT"):
         active_signals.append({
             "model": "DAF",
             "bias": daf["reversal_bias"],
             "strength": float(daf.get("failure_strength", 0.0)),
+            "timeframe": "1m",
+            "trigger_reason": f"DELTA_FAIL_{daf.get('aggressive_side_failed', 'UNKNOWN')}",
+            "timestamp": daf.get("timestamp_utc", "UNKNOWN"),
         })
     if fcr and fcr.get("continuation_failed"):
         trapped_side = fcr.get("trapped_side")
@@ -61,6 +81,9 @@ def compute_model_registry(
                 "model": "FCR",
                 "bias": bias,
                 "strength": float(fcr.get("trap_strength", 0.0)),
+                "timeframe": "1m",
+                "trigger_reason": f"CONTINUATION_FAILED_{trapped_side}_TRAPPED",
+                "timestamp": fcr.get("timestamp_utc", "UNKNOWN"),
             })
 
     long_strength = sum(s["strength"] for s in active_signals if s["bias"] == "LONG")
@@ -97,6 +120,7 @@ def compute_model_registry(
         f"ACTIVE_MODELS_{len(active_signals)}",
         f"CONSENSUS_{consensus}",
         f"CANDLE_{candle_quality}",
+        "TIMEFRAME_1M",
         f"DQ_{dq_level}",
         "SAFE_TO_OPEN_REAL_TRADE_FALSE",
         "NO_PRIVATE_API",
@@ -110,6 +134,8 @@ def compute_model_registry(
         "symbol": symbol,
         "source": "PHASE1_MODEL_LAYER",
         "input_status": input_status,
+        "timeframe": "1m",
+        "candle_close_time": _candle_close_time(market_truth),
         "active_model_count": len(active_signals),
         "active_signals": active_signals,
         "candle_quality": candle_quality,
@@ -134,6 +160,8 @@ def no_valid_output(reason: str) -> dict[str, Any]:
         "symbol": "UNKNOWN",
         "source": "PHASE1_MODEL_LAYER",
         "input_status": "MISSING",
+        "timeframe": "1m",
+        "candle_close_time": "UNKNOWN",
         "active_model_count": 0,
         "active_signals": [],
         "candle_quality": "UNKNOWN",
@@ -167,12 +195,13 @@ def run_model_registry() -> dict[str, Any]:
     daf = _load_json(DAF_PATH)
     fcr = _load_json(FCR_PATH)
     cqe = _load_json(CQE_PATH)
+    market_truth = _load_json(MARKET_TRUTH_PATH)
 
     if ar01 is None and daf is None and fcr is None and cqe is None:
         result = no_valid_output("ALL_MODEL_INPUTS_MISSING")
     else:
         try:
-            result = compute_model_registry(ar01, daf, fcr, cqe)
+            result = compute_model_registry(ar01, daf, fcr, cqe, market_truth)
         except Exception:
             result = no_valid_output("COMPUTE_ERROR")
 

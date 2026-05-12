@@ -100,7 +100,15 @@ def print_summary(data: dict, cycle: int) -> None:
         candle_q = mreg.get("candle_quality", "?")
         long_pct = mreg.get("long_probability_pct", 50)
         short_pct = mreg.get("short_probability_pct", 50)
+        active_signals = mreg.get("active_signals", [])
         print(f"  Model    : CONSENSUS={consensus} | signals={n_signals} | candle={candle_q} | L={long_pct}% S={short_pct}%")
+        if active_signals:
+            for sig in active_signals:
+                model_name = sig.get("model", "?")
+                bias = sig.get("bias", "?")
+                strength = float(sig.get("strength", 0) or 0)
+                reason = sig.get("trigger_reason", "?")
+                print(f"             [{model_name}] {bias} strength={strength:.1f} | {reason}")
     else:
         print("  Model    : (henuz yok)")
 
@@ -108,13 +116,17 @@ def print_summary(data: dict, cycle: int) -> None:
     tp = _read_json(STATE_DIR / "latest_trade_plan.json")
     if tp:
         plan      = tp.get("trade_plan") or tp
-        t_status  = plan.get("trade_plan_status", tp.get("decision_status", "?"))
+        t_status  = plan.get("plan_status", plan.get("trade_plan_status", tp.get("decision_status", "?")))
         direction = plan.get("direction", plan.get("side", "?"))
         entry     = plan.get("entry_price", "?")
         sl        = plan.get("stop_loss", "?")
         tp1v      = plan.get("tp1", "?")
         rr        = plan.get("rr_tp1", plan.get("rr", "?"))
-        print(f"  Plan     : {t_status} | {direction} | entry={entry} sl={sl} tp1={tp1v} RR={rr}")
+        veto_reason = plan.get("model_veto_reason")
+        if veto_reason:
+            print(f"  Plan     : {t_status} | {veto_reason}")
+        else:
+            print(f"  Plan     : {t_status} | {direction} | entry={entry} sl={sl} tp1={tp1v} RR={rr}")
     else:
         print(f"  Plan     : (dosya yok)")
 

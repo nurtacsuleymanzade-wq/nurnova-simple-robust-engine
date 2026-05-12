@@ -16,6 +16,8 @@ SETUP_CONTEXT_PATH = STATE_DIR / "latest_setup_context.json"
 FLOW_STATE_PATH = STATE_DIR / "latest_flow_state.json"
 EVIDENCE_PATH = STATE_DIR / "latest_flow_evidence.json"
 PERSISTENCE_PATH = STATE_DIR / "latest_flow_persistence.json"
+MARKET_TRUTH_PATH = STATE_DIR / "latest_market_truth.json"
+MODEL_REGISTRY_PATH = STATE_DIR / "latest_model_registry.json"
 
 DEPTH_MEMORY_PATH = STATE_DIR / "latest_depth_liquidity_memory.json"
 CONTEXT_SYNC_PATH = STATE_DIR / "latest_context_sync.json"
@@ -146,12 +148,26 @@ def _direction_ok(side: str, entry: float, sl: float, tp1: float, tp2: float) ->
     return False
 
 
+def _market_candle_close_time(market_truth: dict[str, Any] | None) -> str:
+    if not market_truth:
+        return "UNKNOWN"
+    return (
+        market_truth.get("candle_close_time")
+        or (market_truth.get("market_truth") or {}).get("candle_close_time")
+        or market_truth.get("timestamp_utc")
+        or (market_truth.get("official_candle") or {}).get("close_time_utc")
+        or "UNKNOWN"
+    )
+
+
 def compute_trade_plan(
     scenario_trigger: dict[str, Any] | None,
     setup_context: dict[str, Any] | None,
     flow_state: dict[str, Any] | None,
     evidence: dict[str, Any] | None,
     persistence: dict[str, Any] | None,
+    market_truth: dict[str, Any] | None = None,
+    model_registry: dict[str, Any] | None = None,
     depth_memory: dict[str, Any] | None = None,
     context_sync: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -175,6 +191,9 @@ def compute_trade_plan(
     flow_state = flow_state or {}
     evidence = evidence or {}
     persistence = persistence or {}
+    market_truth = market_truth or {}
+    if model_registry is None:
+        model_registry = _load_json(MODEL_REGISTRY_PATH)
 
     symbol = (
         scenario_trigger.get("symbol")
@@ -221,6 +240,8 @@ def compute_trade_plan(
     invalidation_reason = "No plan — invalidation not defined."
 
     quality_score = 0.0
+    model_veto = False
+    model_veto_reason: str | None = None
 
     if input_status == "MISSING" or not scenario_trigger:
         plan_status = "NO_PLAN"
@@ -323,6 +344,20 @@ def compute_trade_plan(
                     f"Plan invalidated if price reaches {invalidation_price} — same as stop, aligned with side={side}."
                 )
 
+    if model_registry and int(model_registry.get("active_model_count", 0) or 0) > 0:
+        model_consensus = model_registry.get("consensus_direction", "NEUTRAL")
+        model_strength = max(
+            float(model_registry.get("long_probability_pct", 50.0)),
+            float(model_registry.get("short_probability_pct", 50.0)),
+        )
+        if model_consensus != "NEUTRAL" and side != "NEUTRAL" and model_consensus != side and model_strength > 65.0:
+            model_veto = True
+            model_veto_reason = f"MODEL_VETO_{side}_CONSENSUS_{model_consensus}_STRENGTH_{model_strength}"
+            reason_codes.append(model_veto_reason)
+            plan_status = "INVALID"
+            plan_grade = "NO_PLAN"
+            quality_score = 0.0
+
     if plan_status == "PLAN_READY":
         plan_grade = _grade_from_rr(rr_tp1, rr_tp2, trigger_strength, confidence)
     elif plan_status == "WATCH_ONLY":
@@ -391,6 +426,10 @@ def compute_trade_plan(
         "stop_reason": stop_reason,
         "tp_reason": tp_reason,
         "invalidation_reason": invalidation_reason,
+        "model_veto": model_veto,
+        "model_veto_reason": model_veto_reason,
+        "timeframe": "1m",
+        "candle_close_time": _market_candle_close_time(market_truth),
         "risk_context": risk_context,
         "data_quality": {"level": dq_level, "score": dq_score},
         "reason_codes": reason_codes,
@@ -426,6 +465,10 @@ def no_valid_output(reason: str) -> dict[str, Any]:
         "stop_reason": "No plan — stop not defined.",
         "tp_reason": "No plan — targets not defined.",
         "invalidation_reason": "No plan — invalidation not defined.",
+        "model_veto": False,
+        "model_veto_reason": None,
+        "timeframe": "1m",
+        "candle_close_time": "UNKNOWN",
         "risk_context": {
             "stop_distance": 0.0,
             "tp1_distance": 0.0,
@@ -466,6 +509,8 @@ def run_trade_plan_engine() -> dict[str, Any]:
     flow_state = _load_json(FLOW_STATE_PATH)
     evidence = _load_json(EVIDENCE_PATH)
     persistence = _load_json(PERSISTENCE_PATH)
+    market_truth = _load_json(MARKET_TRUTH_PATH)
+    model_registry = _load_json(MODEL_REGISTRY_PATH)
     depth_memory = _load_json(DEPTH_MEMORY_PATH)
     context_sync = _load_json(CONTEXT_SYNC_PATH)
 
@@ -475,6 +520,8 @@ def run_trade_plan_engine() -> dict[str, Any]:
         try:
             result = compute_trade_plan(
                 scenario_trigger, setup_context, flow_state, evidence, persistence,
+                market_truth=market_truth,
+                model_registry=model_registry,
                 depth_memory=depth_memory, context_sync=context_sync,
             )
         except Exception:

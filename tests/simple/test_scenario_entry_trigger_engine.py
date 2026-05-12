@@ -263,9 +263,19 @@ def test_model_consensus_conflict_reduces_scenario_score():
     pers = _persistence(3.0, "SUSTAINED_LONG_PRESSURE", "LONG", "STRONG")
     base = compute_scenario_trigger(ctx, None, ev, pers)
     conflict = compute_scenario_trigger(
-        ctx, None, ev, pers, {"consensus_direction": "SHORT", "active_model_count": 2}
+        ctx, None, ev, pers, {
+            "consensus_direction": "SHORT",
+            "active_model_count": 2,
+            "long_probability_pct": 0.0,
+            "short_probability_pct": 100.0,
+        }
     )
-    assert conflict["scenario_score"] < base["scenario_score"]
+    assert conflict["direction_bias"] == "SHORT"
+    assert conflict["scenario_label"] == "MODEL_SHORT_OVERRIDE"
+    assert "MODEL_OVERRIDE_LONG_TO_SHORT" in conflict["reason_codes"]
+    assert conflict["model_integration"]["model_consensus"] == "SHORT"
+    assert conflict["timeframe"] == "1m"
+    assert base["scenario_score"] != conflict["scenario_score"]
 
 
 def test_ready_for_entry_blocked_by_flip_risk():
@@ -360,8 +370,8 @@ def test_required_output_fields():
         "trigger_state", "trigger_strength", "trigger_confidence", "trigger_reason",
         "estimated_move_probability", "estimated_failure_probability",
         "estimated_fakeout_probability", "market_regime", "tradeable",
-        "ready_for_entry", "data_quality", "reason_codes", "feeds_next",
-        "execution_safety",
+        "ready_for_entry", "model_integration", "timeframe", "candle_close_time",
+        "data_quality", "reason_codes", "feeds_next", "execution_safety",
     }
     assert required <= set(r.keys())
 

@@ -92,6 +92,9 @@ def compute_decision_gate(
         warning_reasons.append("SCENARIO_TRIGGER_MISSING")
     if not model_registry or int(model_registry.get("active_model_count", 0) or 0) == 0:
         warning_reasons.append("NO_MODEL_SIGNAL")
+    if trade_plan and trade_plan.get("model_veto", False):
+        block_reasons.append("MODEL_VETO_DETECTED")
+        reason_codes.append(trade_plan.get("model_veto_reason", "MODEL_VETO"))
 
     trade_plan = trade_plan or {}
     scenario_trigger = scenario_trigger or {}
@@ -122,6 +125,7 @@ def compute_decision_gate(
     plan_dq = trade_plan.get("data_quality", {}) or {}
     dq_level = plan_dq.get("level", "MISSING")
     dq_score = float(plan_dq.get("score", 0.0))
+    model_veto = bool(trade_plan.get("model_veto", False))
 
     ready_for_entry = bool(scenario_trigger.get("ready_for_entry", False))
     trigger_strength = float(scenario_trigger.get("trigger_strength", 0.0))
@@ -193,7 +197,10 @@ def compute_decision_gate(
         or (input_available and not safety_valid)
     )
 
-    if invalid:
+    if model_veto:
+        decision = "BLOCK"
+        decision_status = "BLOCKED"
+    elif invalid:
         decision = "BLOCK"
         decision_status = "INVALID" if (plan_status == "INVALID" or not input_available) else "BLOCKED"
     elif block_reasons:

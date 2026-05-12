@@ -65,6 +65,7 @@ def test_cqe_output_fields_present():
     assert result["block_id"] == "CQE_CANDLE_QUALITY"
     assert result["candle_quality"] == "STRONG_BULLISH"
     assert result["delta_aligned"] is True
+    assert result["timeframe"] == "1m"
 
 
 def test_missing_input_returns_no_valid_output():

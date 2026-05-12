@@ -59,6 +59,7 @@ def test_fcr_output_fields_present():
     assert result["block_id"] == "FCR_FAILED_CONTINUATION"
     assert result["had_momentum"] is True
     assert "trap_strength" in result
+    assert result["timeframe"] == "1m"
 
 
 def test_missing_input_returns_no_valid_output():

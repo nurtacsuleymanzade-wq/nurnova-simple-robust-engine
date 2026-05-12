@@ -265,6 +265,23 @@ def test_no_model_signal_warning_added():
     assert "NO_MODEL_SIGNAL" in r["warning_reasons"]
 
 
+def test_model_veto_blocks_decision():
+    veto_plan = _plan("LONG", plan_status="INVALID", reasons=["MODEL_VETO_LONG_CONSENSUS_SHORT_STRENGTH_100.0"])
+    veto_plan["model_veto"] = True
+    veto_plan["model_veto_reason"] = "MODEL_VETO_LONG_CONSENSUS_SHORT_STRENGTH_100.0"
+    r = compute_decision_gate(
+        veto_plan,
+        _trig(),
+        None,
+        None,
+        None,
+        None,
+        {"active_model_count": 1, "consensus_direction": "SHORT"},
+    )
+    assert r["decision"] == "BLOCK"
+    assert "MODEL_VETO_DETECTED" in r["block_reasons"]
+
+
 # --- Test 15: empty plan reasons blocks ---
 
 def test_empty_plan_reasons_blocks():

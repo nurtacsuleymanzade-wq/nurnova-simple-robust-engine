@@ -112,6 +112,8 @@ def compute_absorption_reversal(evidence: dict[str, Any]) -> dict[str, Any]:
         "reversal_probability": reversal_probability,
         "absorption_strength": absorption_strength,
         "reversal_bias": reversal_bias,
+        "timeframe": "1m",
+        "candle_close_time": evidence.get("timestamp_utc", "UNKNOWN"),
         "reason_codes": reason_codes,
         "data_quality": evidence.get("data_quality", {"level": "OK", "score": 1.0}),
         "feeds_next": {"next_blocks": ["S15_FLOW_TO_SETUP_CONTEXT", "S18_DECISION_GATE"]},
@@ -137,6 +139,8 @@ def no_valid_output(reason: str) -> dict[str, Any]:
         "reversal_probability": 0.0,
         "absorption_strength": 0.0,
         "reversal_bias": "NEUTRAL",
+        "timeframe": "1m",
+        "candle_close_time": "UNKNOWN",
         "reason_codes": [
             "INPUT_MISSING",
             reason,

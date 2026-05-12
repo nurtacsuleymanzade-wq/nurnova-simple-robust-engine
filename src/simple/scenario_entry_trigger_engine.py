@@ -118,25 +118,16 @@ def _scenario_score(setup_score: float, persistence_score: float, evidence_score
     return _clamp(round(raw, 4), -10.0, 10.0)
 
 
-def _apply_model_consensus(
-    setup_score: float,
-    direction_bias: str,
-    model_registry: dict[str, Any] | None,
-) -> tuple[float, str]:
-    if direction_bias not in ("LONG", "SHORT") or not model_registry:
-        return setup_score, "MODEL_NEUTRAL"
-
-    consensus = model_registry.get("consensus_direction", "NEUTRAL")
-    active_count = int(model_registry.get("active_model_count", 0) or 0)
-    if active_count == 0 or consensus not in ("LONG", "SHORT"):
-        return setup_score, "MODEL_NEUTRAL"
-
-    if consensus == direction_bias:
-        adjusted = setup_score + 1.0 if direction_bias == "LONG" else setup_score - 1.0
-        return _clamp(adjusted, -10.0, 10.0), "MODEL_ALIGNED"
-
-    adjusted = setup_score - 1.5 if direction_bias == "LONG" else setup_score + 1.5
-    return _clamp(adjusted, -10.0, 10.0), "MODEL_CONFLICT"
+def _flow_candle_close_time(flow_state: dict[str, Any] | None) -> str:
+    if not flow_state:
+        return "UNKNOWN"
+    bucket = flow_state.get("latest_bucket") or {}
+    return (
+        bucket.get("bucket_second")
+        or flow_state.get("bucket_second")
+        or flow_state.get("timestamp_utc")
+        or "UNKNOWN"
+    )
 
 
 def _trigger_strength(
@@ -318,6 +309,8 @@ def compute_scenario_trigger(
     setup_context = setup_context or {}
     evidence = evidence or {}
     persistence = persistence or {}
+    if model_registry is None:
+        model_registry = _load_json(MODEL_REGISTRY_PATH)
 
     symbol = (
         setup_context.get("symbol")
@@ -344,21 +337,48 @@ def compute_scenario_trigger(
     continuation_quality = persistence.get("continuation_quality", "NONE")
     decay_risk = bool(persistence.get("decay_risk", False))
     flip_risk = bool(persistence.get("flip_risk", False))
-    adjusted_setup_score, model_alignment = _apply_model_consensus(
-        setup_score, direction_bias, model_registry
-    )
+    model_consensus = "NEUTRAL"
+    model_strength = 0.0
+    model_signal_count = 0
+    model_setup_aligned: bool | None = None
+    model_override = False
 
     if input_status == "MISSING":
         setup_label = "INSUFFICIENT_CONTEXT"
         direction_bias = "UNKNOWN"
-        adjusted_setup_score = 0.0
+        setup_score = 0.0
+
+    if model_registry and int(model_registry.get("active_model_count", 0) or 0) > 0:
+        model_consensus = model_registry.get("consensus_direction", "NEUTRAL")
+        model_signal_count = int(model_registry.get("active_model_count", 0) or 0)
+        long_pct = float(model_registry.get("long_probability_pct", 50.0))
+        short_pct = float(model_registry.get("short_probability_pct", 50.0))
+        model_strength = max(long_pct, short_pct)
+
+        if model_consensus != "NEUTRAL" and direction_bias != "NEUTRAL":
+            if model_consensus != direction_bias and model_strength > 60.0:
+                reason_codes.append(f"MODEL_OVERRIDE_{direction_bias}_TO_{model_consensus}")
+                direction_bias = model_consensus
+                setup_score = abs(setup_score) if model_consensus == "LONG" else -abs(setup_score)
+                model_override = True
+            elif model_consensus == direction_bias:
+                reason_codes.append(f"MODEL_CONFIRMS_{direction_bias}")
+                if setup_score >= 0:
+                    setup_score = min(10.0, setup_score * 1.2)
+                else:
+                    setup_score = max(-10.0, setup_score * 1.2)
+
+    if model_consensus != "NEUTRAL" and direction_bias in ("LONG", "SHORT"):
+        model_setup_aligned = model_consensus == direction_bias
 
     scenario_label = _scenario_label(
         setup_label, evidence_label, persistence_label,
-        direction_bias, decay_risk, flip_risk, adjusted_setup_score, context_confidence,
+        direction_bias, decay_risk, flip_risk, setup_score, context_confidence,
     )
+    if model_override:
+        scenario_label = f"MODEL_{direction_bias}_OVERRIDE"
 
-    scenario_score = _scenario_score(adjusted_setup_score, persistence_score, evidence_score)
+    scenario_score = _scenario_score(setup_score, persistence_score, evidence_score)
 
     trigger_strength = _trigger_strength(
         context_confidence, setup_score, continuation_quality, decay_risk, flip_risk
@@ -399,7 +419,7 @@ def compute_scenario_trigger(
         f"TRIGGER_{trigger_state}",
         f"DIRECTION_{direction_bias}",
         f"REGIME_{market_regime}",
-        model_alignment,
+        f"MODEL_CONSENSUS_{model_consensus}",
         f"DQ_{dq_level}",
         "SAFE_TO_OPEN_REAL_TRADE_FALSE",
         "NO_PRIVATE_API",
@@ -431,6 +451,14 @@ def compute_scenario_trigger(
         "market_regime": market_regime,
         "tradeable": tradeable,
         "ready_for_entry": ready,
+        "model_integration": {
+            "model_consensus": model_consensus,
+            "model_strength": round(model_strength, 1),
+            "model_signal_count": model_signal_count,
+            "model_setup_aligned": model_setup_aligned,
+        },
+        "timeframe": "1m",
+        "candle_close_time": _flow_candle_close_time(flow_state),
         "data_quality": {"level": dq_level, "score": dq_score},
         "reason_codes": reason_codes,
         "feeds_next": {"next_blocks": ["S17_TRADE_PLAN_ENGINE"]},
@@ -462,6 +490,14 @@ def no_valid_output(reason: str) -> dict[str, Any]:
         "market_regime": "UNKNOWN",
         "tradeable": False,
         "ready_for_entry": False,
+        "model_integration": {
+            "model_consensus": "NEUTRAL",
+            "model_strength": 0.0,
+            "model_signal_count": 0,
+            "model_setup_aligned": None,
+        },
+        "timeframe": "1m",
+        "candle_close_time": "UNKNOWN",
         "data_quality": {"level": "MISSING", "score": 0.0},
         "reason_codes": [
             "INSUFFICIENT_DATA",

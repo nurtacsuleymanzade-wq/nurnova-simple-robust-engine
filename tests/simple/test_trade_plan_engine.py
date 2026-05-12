@@ -75,6 +75,14 @@ def _flow_state(price: float = 80000.0) -> dict:
     }
 
 
+def _market_truth() -> dict:
+    return {
+        "timestamp_utc": "2026-05-11T12:00:00Z",
+        "candle_close_time": "2026-05-11T12:00:00Z",
+        "official_candle": {"close_time_utc": "2026-05-11T12:00:00Z"},
+    }
+
+
 # --- Test 1: valid long plan ---
 
 def test_valid_long_plan():
@@ -252,10 +260,33 @@ def test_required_output_fields():
         "plan_status", "side", "entry_price", "stop_loss", "tp1", "tp2",
         "rr_tp1", "rr_tp2", "invalidation_price", "plan_quality_score",
         "plan_grade", "entry_reason", "stop_reason", "tp_reason",
-        "invalidation_reason", "risk_context", "data_quality",
+        "invalidation_reason", "model_veto", "model_veto_reason", "timeframe",
+        "candle_close_time", "risk_context", "data_quality",
         "reason_codes", "feeds_next", "execution_safety",
     }
     assert required <= set(r.keys())
+
+
+def test_model_veto_invalidates_plan():
+    r = compute_trade_plan(
+        _trigger("LONG", trigger_strength=0.95),
+        _setup("LONG", 0.95),
+        _flow_state(80000.0),
+        None,
+        None,
+        market_truth=_market_truth(),
+        model_registry={
+            "active_model_count": 1,
+            "consensus_direction": "SHORT",
+            "long_probability_pct": 0.0,
+            "short_probability_pct": 100.0,
+        },
+    )
+    assert r["plan_status"] == "INVALID"
+    assert r["model_veto"] is True
+    assert r["model_veto_reason"] == "MODEL_VETO_LONG_CONSENSUS_SHORT_STRENGTH_100.0"
+    assert r["timeframe"] == "1m"
+    assert r["candle_close_time"] == "2026-05-11T12:00:00Z"
 
 
 # --- Test 13: degraded DQ → WATCH_ONLY not PLAN_READY ---
