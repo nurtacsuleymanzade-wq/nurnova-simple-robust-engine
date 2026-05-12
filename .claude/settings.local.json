@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(jobs *)",
+      "Bash(dir state\\\\simple\\\\*liquidity*)",
+      "Bash(dir data\\\\simple\\\\*liquidity*)",
+      "Bash(dir reports\\\\simple\\\\*s5*)"
+    ]
+  }
+}

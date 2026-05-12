@@ -1,0 +1,430 @@
+"""S11.1 Local Full Pipeline Runner — NOVA SIMPLE ROBUST ENGINE v1.
+
+DUZELTME v2: S1-S22 arasi tum bloklar dahil edildi.
+S1 gercek flow_state'den okur. S13-S22 kendi state dosyalarindan okur.
+No live trading. No private API. safe_to_open_real_trade always false.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import importlib
+import io
+import json
+import sys
+import time
+from datetime import datetime, timezone
+from typing import Any
+
+BLOCK_ID = "S11_1_LOCAL_PIPELINE_RUNNER"
+FEEDS_NEXT: dict[str, list[str]] = {"next_blocks": []}
+
+_REQUIRED_CONTRACT_FIELDS = frozenset(
+    {"timestamp_utc", "block_id", "symbol", "source", "data_quality", "reason_codes", "feeds_next"}
+)
+
+# (modul, fonksiyon_veya_LIVE, fallback_label)
+# "LIVE" = S1 icin gercek flow_state'den okur
+# "NOARG" = fonksiyon arguman almaz, direkt cagrilir
+# "run_fake_sample" = eski davranis, symbol argumaniyla cagrilir
+_STAGES: list[tuple[str, str, str]] = [
+    # --- Veri katmani ---
+    ("src.simple.run_s1_market_truth",            "LIVE",            "S1_OFFICIAL_MARKET_TRUTH"),
+    ("src.simple.run_s2_1s_evidence",            "LIVE_S2",         "S2_LIGHTWEIGHT_1S_EVIDENCE"),
+    ("src.simple.run_s3_hybrid_candle_dna",       "LIVE_S3",         "S3_HYBRID_CANDLE_DNA"),
+    ("src.simple.quality_weight_engine",          "LIVE_S4",         "S4_QUALITY_WEIGHT_ENGINE"),
+    ("src.simple.liquidity_structure_engine",     "LIVE_S5",         "S5_LIQUIDITY_STRUCTURE_CONTEXT"),
+    # --- Setup katmani ---
+    ("src.simple.setup_candidate_engine",         "LIVE_S6",         "S6_SCENARIO_SETUP_CANDIDATE"),
+    # --- Flow katmani (S13-S15) ---
+    ("src.simple.flow_evidence_engine",           "NOARG",           "S13_FLOW_EVIDENCE"),
+    ("src.simple.flow_persistence_engine",        "NOARG",           "S14_FLOW_PERSISTENCE"),
+    ("src.simple.flow_to_setup_context_engine",   "NOARG",           "S15_FLOW_TO_SETUP_CONTEXT"),
+    # --- Senaryo ve karar (S16-S18) ---
+    ("src.simple.scenario_entry_trigger_engine",  "NOARG",           "S16_SCENARIO_ENTRY_TRIGGER"),
+    ("src.simple.trade_plan_engine",              "NOARG",           "S17_TRADE_PLAN"),
+    ("src.simple.decision_gate_engine",           "NOARG",           "S18_DECISION_GATE"),
+    # --- Paper ve ogrenme (S20-S22) ---
+    ("src.simple.paper_lifecycle_tracker",        "NOARG", "S20_PAPER_LIFECYCLE"),
+    ("src.simple.outcome_monitor",                "NOARG", "S21_OUTCOME_MONITOR"),
+    ("src.simple.edge_matrix_v2",                 "NOARG", "S22_EDGE_MATRIX"),
+    # --- Raporlama ---
+    ("src.simple.simple_brain_report_engine",     "run_fake_sample", "S10_SIMPLE_BRAIN_REPORT"),
+]
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _check_critical(output: dict[str, Any]) -> str | None:
+    for field in _REQUIRED_CONTRACT_FIELDS:
+        if field not in output:
+            return f"MISSING_FIELD_{field.upper()}"
+    if not output.get("reason_codes"):
+        return "REASON_CODES_EMPTY"
+    return None
+
+
+def _classify_status(output: dict[str, Any]) -> str:
+    level = output.get("data_quality", {}).get("level", "")
+    if level in ("LOW", "CRITICAL", "INVALID"):
+        return "DEGRADED"
+    return "PASSED"
+
+
+def _run_live_s1(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
+    """S1'i gercek flow_state'den calistir."""
+    t0 = time.monotonic()
+    try:
+        old_argv = sys.argv
+        sys.argv = ["run_s1_market_truth", "--symbol", symbol]
+        try:
+            from src.simple.run_s1_market_truth import main as s1_main
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                s1_main()
+            output = json.loads(buf.getvalue())
+        finally:
+            sys.argv = old_argv
+        return output, round((time.monotonic() - t0) * 1000, 1), None
+    except Exception as exc:
+        return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
+
+
+def _run_stage(module_path: str, func_name: str, symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
+    if func_name == "LIVE":
+        return _run_live_s1(symbol)
+
+    t0 = time.monotonic()
+    try:
+        mod = importlib.import_module(module_path)
+        fn = getattr(mod, func_name)
+        if func_name == "NOARG":
+            # Fonksiyon adi NOARG ise modul icerisindeki ilk run_ fonksiyonu cagrilir
+            # Ama biz string olarak sakladik, asil cagri asagida
+            raise ValueError("NOARG should be resolved before calling")
+        result: dict[str, Any] = fn(symbol)
+        return result, round((time.monotonic() - t0) * 1000, 1), None
+    except Exception as exc:
+        return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
+
+
+def _run_noarg_stage(module_path: str) -> tuple[dict[str, Any] | None, float, str | None]:
+    """Argumansiz engine fonksiyonlarini calistir."""
+    t0 = time.monotonic()
+    try:
+        mod = importlib.import_module(module_path)
+        # run_ ile baslayan ilk fonksiyonu bul
+        run_fn = None
+        for name in dir(mod):
+            if name.startswith("run_") and callable(getattr(mod, name)):
+                run_fn = getattr(mod, name)
+                break
+        if run_fn is None:
+            raise ValueError(f"No run_ function found in {module_path}")
+        result: dict[str, Any] = run_fn()
+        return result, round((time.monotonic() - t0) * 1000, 1), None
+    except Exception as exc:
+        return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
+
+
+def run_pipeline(symbol: str, source_mode: str = "LIVE") -> dict[str, Any]:
+    """Execute S1-S22 sequentially."""
+    block_results: list[dict[str, Any]] = []
+    blocks_passed = 0
+    blocks_failed = 0
+    pipeline_status = "COMPLETE"
+    stop_reason: str | None = None
+
+    for module_path, func_name, fallback_label in _STAGES:
+        # Dogru cagri yontemini sec
+        if func_name == "LIVE":
+            output, runtime_ms, exc_str = _run_live_s1(symbol)
+        elif func_name == "LIVE_S2":
+            output, runtime_ms, exc_str = _run_live_s2(symbol)
+        elif func_name == "LIVE_S3":
+            output, runtime_ms, exc_str = _run_live_s3(symbol)
+        elif func_name == "LIVE_S4":
+            output, runtime_ms, exc_str = _run_live_s4_direct(symbol)
+        elif func_name == "LIVE_S5":
+            output, runtime_ms, exc_str = _run_live_s5_direct(symbol)
+        elif func_name == "LIVE_S6":
+            output, runtime_ms, exc_str = _run_live_s6_direct(symbol)
+        elif func_name == "NOARG":
+            output, runtime_ms, exc_str = _run_noarg_stage(module_path)
+        else:
+            t0 = time.monotonic()
+            try:
+                mod = importlib.import_module(module_path)
+                fn = getattr(mod, func_name)
+                output = fn(symbol)
+                runtime_ms = round((time.monotonic() - t0) * 1000, 1)
+                exc_str = None
+            except Exception as exc:
+                output = None
+                runtime_ms = round((time.monotonic() - t0) * 1000, 1)
+                exc_str = str(exc)
+
+        if exc_str is not None:
+            block_results.append({
+                "block_id": fallback_label,
+                "status": "CRITICAL",
+                "runtime_ms": runtime_ms,
+                "error": exc_str[:200],
+            })
+            blocks_failed += 1
+            # Kritik olmayan bloklar icin devam et (S20-S22 vb)
+            critical_blocks = {"S1_", "S2_", "S3_", "S4_", "S5_", "S6_"}
+            if any(fallback_label.startswith(cb) for cb in critical_blocks):
+                pipeline_status = "STOPPED_CRITICAL"
+                stop_reason = f"EXCEPTION_IN_{fallback_label}"
+                break
+            continue
+
+        if output is None:
+            block_results.append({
+                "block_id": fallback_label,
+                "status": "DEGRADED",
+                "runtime_ms": runtime_ms,
+                "error": "NO_OUTPUT",
+            })
+            blocks_failed += 1
+            continue
+
+        violation = _check_critical(output)
+        if violation:
+            block_results.append({
+                "block_id": output.get("block_id", fallback_label),
+                "status": "DEGRADED",
+                "runtime_ms": runtime_ms,
+                "error": violation,
+            })
+            blocks_failed += 1
+            continue
+
+        status = _classify_status(output)
+        block_results.append({
+            "block_id": output.get("block_id", fallback_label),
+            "status": status,
+            "runtime_ms": runtime_ms,
+            "error": None,
+        })
+        blocks_passed += 1
+
+    reason_codes = [
+        "SOURCE_FLOW_STATE_LIVE",
+        f"SYMBOL_{symbol}",
+        f"PIPELINE_{pipeline_status}",
+        f"BLOCKS_PASSED_{blocks_passed}",
+        f"BLOCKS_FAILED_{blocks_failed}",
+        "SAFE_TO_OPEN_REAL_TRADE_FALSE",
+        "NO_LIVE_TRADING",
+        "NO_PRIVATE_API",
+    ]
+    if stop_reason:
+        reason_codes.append(f"STOP_{stop_reason[:100]}")
+
+    if pipeline_status == "COMPLETE" and blocks_failed == 0:
+        dq: dict[str, Any] = {"score": 1.0, "level": "HIGH", "issues": []}
+    elif blocks_passed > blocks_failed:
+        dq = {"score": 0.6, "level": "MEDIUM", "issues": [f"BLOCKS_FAILED_{blocks_failed}"]}
+    else:
+        dq = {"score": 0.0, "level": "CRITICAL", "issues": [f"PIPELINE_{pipeline_status}"]}
+
+    return {
+        "timestamp_utc": _utc_now(),
+        "block_id": BLOCK_ID,
+        "symbol": symbol,
+        "source": {"source_mode": "FLOW_STATE_LIVE"},
+        "execution_summary": {
+            "blocks_total": len(_STAGES),
+            "blocks_passed": blocks_passed,
+            "blocks_failed": blocks_failed,
+            "pipeline_status": pipeline_status,
+            "stop_reason": stop_reason,
+        },
+        "block_results": block_results,
+        "data_quality": dq,
+        "reason_codes": reason_codes,
+        "feeds_next": FEEDS_NEXT,
+        "execution_safety": {
+            "safe_to_open_real_trade": False,
+            "private_api_used": False,
+            "live_order_sent": False,
+        },
+    }
+
+
+# ============================================================
+# LIVE HANDLER'LAR — S2-S6 icin gercek veri okuma
+# ============================================================
+
+def _run_live_s2(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
+    """S2'yi gercek flow_state'den calistir."""
+    t0 = time.monotonic()
+    try:
+        old_argv = sys.argv
+        sys.argv = ["run_s2_1s_evidence", "--symbol", symbol]
+        try:
+            from src.simple.run_s2_1s_evidence import main as s2_main
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                s2_main()
+            output = json.loads(buf.getvalue())
+        finally:
+            sys.argv = old_argv
+        return output, round((time.monotonic() - t0) * 1000, 1), None
+    except Exception as exc:
+        return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
+
+
+def _run_live_s3(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
+    """S3'u S1+S2 state dosyalarindan calistir."""
+    t0 = time.monotonic()
+    try:
+        old_argv = sys.argv
+        sys.argv = ["run_s3_hybrid_candle_dna", "--symbol", symbol]
+        try:
+            from src.simple.run_s3_hybrid_candle_dna import main as s3_main
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                s3_main()
+            output = json.loads(buf.getvalue())
+        finally:
+            sys.argv = old_argv
+        return output, round((time.monotonic() - t0) * 1000, 1), None
+    except Exception as exc:
+        return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
+
+
+def _run_live_s4(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
+    """S4'u state dosyalarindan calistir."""
+    t0 = time.monotonic()
+    try:
+        old_argv = sys.argv
+        sys.argv = ["run_s4_quality_weight", "--symbol", symbol]
+        try:
+            from src.simple.run_s4_quality_weight import main as s4_main
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                s4_main()
+            output = json.loads(buf.getvalue())
+        finally:
+            sys.argv = old_argv
+        return output, round((time.monotonic() - t0) * 1000, 1), None
+    except Exception as exc:
+        return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
+
+
+def _run_live_s5(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
+    """S5'i state dosyalarindan calistir."""
+    t0 = time.monotonic()
+    try:
+        old_argv = sys.argv
+        sys.argv = ["run_s5_liquidity_structure", "--symbol", symbol]
+        try:
+            from src.simple.run_s5_liquidity_structure import main as s5_main
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                s5_main()
+            output = json.loads(buf.getvalue())
+        finally:
+            sys.argv = old_argv
+        return output, round((time.monotonic() - t0) * 1000, 1), None
+    except Exception as exc:
+        return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
+
+
+def _run_live_s6(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
+    """S6'yi state dosyalarindan calistir."""
+    t0 = time.monotonic()
+    try:
+        old_argv = sys.argv
+        sys.argv = ["run_s6_setup_candidate", "--symbol", symbol]
+        try:
+            from src.simple.run_s6_setup_candidate import main as s6_main
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                s6_main()
+            output = json.loads(buf.getvalue())
+        finally:
+            sys.argv = old_argv
+        return output, round((time.monotonic() - t0) * 1000, 1), None
+    except Exception as exc:
+        return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
+
+
+def _run_live_s4_direct(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
+    """S4'u state dosyalarindan direkt calistir."""
+    import pathlib, json as _json
+    t0 = time.monotonic()
+    try:
+        state_dir = pathlib.Path("state/simple")
+        
+        s1_raw = _json.loads((state_dir / "latest_market_truth.json").read_text())
+        s1 = {
+            "available": True,
+            "data_quality_score": s1_raw.get("data_quality", {}).get("score", 0.5),
+            "consistency_label": s1_raw.get("consistency", {}).get("consistency_label", "UNKNOWN"),
+        }
+    except Exception:
+        s1 = None
+
+    try:
+        state_dir = pathlib.Path("state/simple")
+        s2_raw = _json.loads((state_dir / "latest_1s_evidence.json").read_text())
+        s2 = {
+            "available": True,
+            "data_quality_score": s2_raw.get("data_quality", {}).get("score", 0.5),
+        }
+    except Exception:
+        s2 = None
+
+    try:
+        state_dir = pathlib.Path("state/simple")
+        s3_raw = _json.loads((state_dir / "latest_hybrid_candle_dna.json").read_text())
+        s3 = {
+            "available": True,
+            "hybrid_quality_weight": s3_raw.get("quality", {}).get("hybrid_quality_weight", 0.5),
+        }
+    except Exception:
+        s3 = None
+
+    try:
+        from src.simple.quality_weight_engine import build_quality_weight
+        from src.simple.run_s4_quality_weight import _write_outputs as s4_write
+        result = build_quality_weight(symbol, s1, s2, s3, "FLOW_STATE_LIVE")
+        s4_write(result)
+        return result, round((time.monotonic() - t0) * 1000, 1), None
+    except Exception as exc:
+        return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
+
+
+def _run_live_s5_direct(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
+    """S5'i state dosyalarindan direkt calistir."""
+    import pathlib, json as _json
+    t0 = time.monotonic()
+    try:
+        from src.simple.run_s5_liquidity_structure import _load_inputs, _write_outputs as s5_write
+        from src.simple.liquidity_structure_engine import build_liquidity_structure
+        s1, s3, s4 = _load_inputs()
+        result = build_liquidity_structure(symbol, s1, s3, s4, "FLOW_STATE_LIVE")
+        s5_write(result)
+        return result, round((time.monotonic() - t0) * 1000, 1), None
+    except Exception as exc:
+        return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
+
+
+def _run_live_s6_direct(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
+    """S6'yi state dosyalarindan direkt calistir."""
+    t0 = time.monotonic()
+    try:
+        from src.simple.run_s6_setup_candidate import _load_inputs, _write_outputs as s6_write
+        from src.simple.setup_candidate_engine import build_setup_candidate
+        s1, s2, s3, s4, s5 = _load_inputs()
+        result = build_setup_candidate(symbol, s1, s2, s3, s4, s5, "FLOW_STATE_LIVE")
+        s6_write(result)
+        return result, round((time.monotonic() - t0) * 1000, 1), None
+    except Exception as exc:
+        return None, round((time.monotonic() - t0) * 1000, 1), str(exc)

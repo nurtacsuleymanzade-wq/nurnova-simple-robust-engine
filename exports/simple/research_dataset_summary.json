@@ -1,0 +1,50 @@
+{
+  "timestamp_utc": "2026-05-10T22:03:08Z",
+  "block_id": "S11_3_RESEARCH_DATASET_EXPORTER",
+  "symbol": "BTCUSDT",
+  "source": {
+    "source_mode": "REPLAY_SAMPLES",
+    "source_file": "data/simple/replay_samples.jsonl",
+    "records_read": 50,
+    "rows_exported": 50,
+    "rows_skipped": 0
+  },
+  "export_stats": {
+    "total_samples": 50,
+    "trades_opened": 20,
+    "no_trade_count": 30,
+    "edge_eligible_count": 18,
+    "win_count": 11,
+    "loss_count": 7,
+    "win_rate": 0.6111,
+    "avg_rr_realized": 0.4288
+  },
+  "data_quality": {
+    "score": 0.6,
+    "level": "MEDIUM",
+    "issues": []
+  },
+  "reason_codes": [
+    "SOURCE_REPLAY_SAMPLES",
+    "TOTAL_SAMPLES_50",
+    "TRADES_OPENED_20",
+    "EDGE_ELIGIBLE_18",
+    "WIN_COUNT_11",
+    "LOSS_COUNT_7",
+    "WIN_RATE_0.6111",
+    "DATA_QUALITY_MEDIUM",
+    "RESEARCH_ONLY",
+    "SAFE_TO_OPEN_REAL_TRADE_FALSE"
+  ],
+  "feeds_next": {
+    "next_blocks": [
+      "QUANT_RESEARCH_PIPELINE"
+    ]
+  },
+  "execution_safety": {
+    "safe_to_open_real_trade": false,
+    "private_api_used": false,
+    "live_order_sent": false,
+    "research_only": true
+  }
+}
