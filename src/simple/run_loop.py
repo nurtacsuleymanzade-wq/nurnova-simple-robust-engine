@@ -13,7 +13,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-ROOT = pathlib.Path(__file__).resolve().parent
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 STATE_DIR = ROOT / "state" / "simple"
 DATA_DIR = ROOT / "data" / "simple"
 
@@ -91,6 +91,18 @@ def print_summary(data: dict, cycle: int) -> None:
         print(f"  Setup    : {status} | {direction} | Grade={grade} | skor={score} | {align} | risk={risk} | src={src_mode}")
     else:
         print(f"  Setup    : (dosya yok)")
+
+    # --- Model Registry ---
+    mreg = _read_json(STATE_DIR / "latest_model_registry.json")
+    if mreg:
+        consensus = mreg.get("consensus_direction", "?")
+        n_signals = mreg.get("active_model_count", 0)
+        candle_q = mreg.get("candle_quality", "?")
+        long_pct = mreg.get("long_probability_pct", 50)
+        short_pct = mreg.get("short_probability_pct", 50)
+        print(f"  Model    : CONSENSUS={consensus} | signals={n_signals} | candle={candle_q} | L={long_pct}% S={short_pct}%")
+    else:
+        print("  Model    : (henuz yok)")
 
     # --- Trade Plan ---
     tp = _read_json(STATE_DIR / "latest_trade_plan.json")

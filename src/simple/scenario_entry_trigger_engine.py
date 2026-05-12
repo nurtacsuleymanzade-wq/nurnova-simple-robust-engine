@@ -15,6 +15,7 @@ SETUP_CONTEXT_PATH = STATE_DIR / "latest_setup_context.json"
 FLOW_STATE_PATH = STATE_DIR / "latest_flow_state.json"
 EVIDENCE_PATH = STATE_DIR / "latest_flow_evidence.json"
 PERSISTENCE_PATH = STATE_DIR / "latest_flow_persistence.json"
+MODEL_REGISTRY_PATH = STATE_DIR / "latest_model_registry.json"
 
 SCENARIO_TRIGGER_PATH = STATE_DIR / "latest_scenario_trigger.json"
 S16_STATE_PATH = STATE_DIR / "s16_scenario_trigger_state.json"
@@ -115,6 +116,27 @@ def _market_regime(
 def _scenario_score(setup_score: float, persistence_score: float, evidence_score: float) -> float:
     raw = 0.5 * setup_score + 0.3 * persistence_score + 0.2 * evidence_score
     return _clamp(round(raw, 4), -10.0, 10.0)
+
+
+def _apply_model_consensus(
+    setup_score: float,
+    direction_bias: str,
+    model_registry: dict[str, Any] | None,
+) -> tuple[float, str]:
+    if direction_bias not in ("LONG", "SHORT") or not model_registry:
+        return setup_score, "MODEL_NEUTRAL"
+
+    consensus = model_registry.get("consensus_direction", "NEUTRAL")
+    active_count = int(model_registry.get("active_model_count", 0) or 0)
+    if active_count == 0 or consensus not in ("LONG", "SHORT"):
+        return setup_score, "MODEL_NEUTRAL"
+
+    if consensus == direction_bias:
+        adjusted = setup_score + 1.0 if direction_bias == "LONG" else setup_score - 1.0
+        return _clamp(adjusted, -10.0, 10.0), "MODEL_ALIGNED"
+
+    adjusted = setup_score - 1.5 if direction_bias == "LONG" else setup_score + 1.5
+    return _clamp(adjusted, -10.0, 10.0), "MODEL_CONFLICT"
 
 
 def _trigger_strength(
@@ -275,6 +297,7 @@ def compute_scenario_trigger(
     flow_state: dict[str, Any] | None,
     evidence: dict[str, Any] | None,
     persistence: dict[str, Any] | None,
+    model_registry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ts = _now_utc()
     reason_codes: list[str] = []
@@ -321,17 +344,21 @@ def compute_scenario_trigger(
     continuation_quality = persistence.get("continuation_quality", "NONE")
     decay_risk = bool(persistence.get("decay_risk", False))
     flip_risk = bool(persistence.get("flip_risk", False))
+    adjusted_setup_score, model_alignment = _apply_model_consensus(
+        setup_score, direction_bias, model_registry
+    )
 
     if input_status == "MISSING":
         setup_label = "INSUFFICIENT_CONTEXT"
         direction_bias = "UNKNOWN"
+        adjusted_setup_score = 0.0
 
     scenario_label = _scenario_label(
         setup_label, evidence_label, persistence_label,
-        direction_bias, decay_risk, flip_risk, setup_score, context_confidence,
+        direction_bias, decay_risk, flip_risk, adjusted_setup_score, context_confidence,
     )
 
-    scenario_score = _scenario_score(setup_score, persistence_score, evidence_score)
+    scenario_score = _scenario_score(adjusted_setup_score, persistence_score, evidence_score)
 
     trigger_strength = _trigger_strength(
         context_confidence, setup_score, continuation_quality, decay_risk, flip_risk
@@ -372,6 +399,7 @@ def compute_scenario_trigger(
         f"TRIGGER_{trigger_state}",
         f"DIRECTION_{direction_bias}",
         f"REGIME_{market_regime}",
+        model_alignment,
         f"DQ_{dq_level}",
         "SAFE_TO_OPEN_REAL_TRADE_FALSE",
         "NO_PRIVATE_API",
@@ -461,12 +489,15 @@ def run_scenario_entry_trigger_engine() -> dict[str, Any]:
     flow_state = _load_json(FLOW_STATE_PATH)
     evidence = _load_json(EVIDENCE_PATH)
     persistence = _load_json(PERSISTENCE_PATH)
+    model_registry = _load_json(MODEL_REGISTRY_PATH)
 
     if setup_context is None and evidence is None and persistence is None:
         result = no_valid_output("ALL_INPUTS_MISSING")
     else:
         try:
-            result = compute_scenario_trigger(setup_context, flow_state, evidence, persistence)
+            result = compute_scenario_trigger(
+                setup_context, flow_state, evidence, persistence, model_registry
+            )
         except Exception:
             result = no_valid_output("COMPUTE_ERROR")
 

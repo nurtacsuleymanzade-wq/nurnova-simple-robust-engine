@@ -257,6 +257,17 @@ def test_ready_for_entry_blocked_by_neutral_direction():
     assert r["trigger_state"] == "NO_TRIGGER"
 
 
+def test_model_consensus_conflict_reduces_scenario_score():
+    ctx = _setup_ctx("WEAK_LONG_CONTEXT", 5.0, "LONG", 0.7, False)
+    ev = _evidence(4.0, "STRONG_LONG_PRESSURE", confidence=0.7)
+    pers = _persistence(3.0, "SUSTAINED_LONG_PRESSURE", "LONG", "STRONG")
+    base = compute_scenario_trigger(ctx, None, ev, pers)
+    conflict = compute_scenario_trigger(
+        ctx, None, ev, pers, {"consensus_direction": "SHORT", "active_model_count": 2}
+    )
+    assert conflict["scenario_score"] < base["scenario_score"]
+
+
 def test_ready_for_entry_blocked_by_flip_risk():
     ctx = _setup_ctx("STRONG_LONG_CONTEXT", 9.0, "LONG", 0.95, True)
     ev = _evidence(9.0, "STRONG_LONG_PRESSURE", confidence=0.95)

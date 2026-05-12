@@ -43,6 +43,12 @@ _STAGES: list[tuple[str, str, str]] = [
     ("src.simple.flow_evidence_engine",           "NOARG",           "S13_FLOW_EVIDENCE"),
     ("src.simple.flow_persistence_engine",        "NOARG",           "S14_FLOW_PERSISTENCE"),
     ("src.simple.flow_to_setup_context_engine",   "NOARG",           "S15_FLOW_TO_SETUP_CONTEXT"),
+    # --- Model layer (after S15, before S16) ---
+    ("src.simple.absorption_reversal_engine",     "NOARG",           "AR01_ABSORPTION_REVERSAL"),
+    ("src.simple.delta_absorption_failure_engine","NOARG",           "DAF_DELTA_ABSORPTION_FAILURE"),
+    ("src.simple.failed_continuation_reversal_engine", "NOARG",      "FCR_FAILED_CONTINUATION"),
+    ("src.simple.candle_quality_engine",          "NOARG",           "CQE_CANDLE_QUALITY"),
+    ("src.simple.model_registry",                 "NOARG",           "MODEL_REGISTRY"),
     # --- Senaryo ve karar (S16-S18) ---
     ("src.simple.scenario_entry_trigger_engine",  "NOARG",           "S16_SCENARIO_ENTRY_TRIGGER"),
     ("src.simple.trade_plan_engine",              "NOARG",           "S17_TRADE_PLAN"),

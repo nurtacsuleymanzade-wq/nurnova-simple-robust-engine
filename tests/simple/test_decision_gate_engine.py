@@ -31,7 +31,7 @@ def _plan(
     sl: float | None = None,
     tp1: float | None = None,
     tp2: float | None = None,
-    rr1: float = 1.2,
+    rr1: float = 1.6,
     rr2: float = 2.0,
     dq_level: str = "OK",
     dq_score: float = 1.0,
@@ -250,6 +250,19 @@ def test_plan_not_ready_watch():
     )
     assert r["decision"] == "WATCH"
     assert any("PLAN_NOT_READY" in w for w in r["warning_reasons"])
+
+
+def test_no_model_signal_warning_added():
+    r = compute_decision_gate(
+        _plan("LONG"),
+        _trig(),
+        None,
+        None,
+        None,
+        None,
+        {"active_model_count": 0},
+    )
+    assert "NO_MODEL_SIGNAL" in r["warning_reasons"]
 
 
 # --- Test 15: empty plan reasons blocks ---

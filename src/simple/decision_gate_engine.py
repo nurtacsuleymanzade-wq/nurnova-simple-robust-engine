@@ -17,6 +17,7 @@ SETUP_CONTEXT_PATH = STATE_DIR / "latest_setup_context.json"
 FLOW_STATE_PATH = STATE_DIR / "latest_flow_state.json"
 EVIDENCE_PATH = STATE_DIR / "latest_flow_evidence.json"
 PERSISTENCE_PATH = STATE_DIR / "latest_flow_persistence.json"
+MODEL_REGISTRY_PATH = STATE_DIR / "latest_model_registry.json"
 
 DECISION_GATE_PATH = STATE_DIR / "latest_decision_gate.json"
 S18_STATE_PATH = STATE_DIR / "s18_decision_gate_state.json"
@@ -72,6 +73,7 @@ def compute_decision_gate(
     flow_state: dict[str, Any] | None,
     evidence: dict[str, Any] | None,
     persistence: dict[str, Any] | None,
+    model_registry: dict[str, Any] | None = None,
     depth_memory: dict[str, Any] | None = None,
     wall_lifecycle: dict[str, Any] | None = None,
     context_sync: dict[str, Any] | None = None,
@@ -88,6 +90,8 @@ def compute_decision_gate(
         block_reasons.append("TRADE_PLAN_MISSING")
     if scenario_trigger is None:
         warning_reasons.append("SCENARIO_TRIGGER_MISSING")
+    if not model_registry or int(model_registry.get("active_model_count", 0) or 0) == 0:
+        warning_reasons.append("NO_MODEL_SIGNAL")
 
     trade_plan = trade_plan or {}
     scenario_trigger = scenario_trigger or {}
@@ -95,6 +99,7 @@ def compute_decision_gate(
     flow_state = flow_state or {}
     evidence = evidence or {}
     persistence = persistence or {}
+    model_registry = model_registry or {}
 
     symbol = (
         trade_plan.get("symbol")
@@ -363,6 +368,7 @@ def run_decision_gate_engine() -> dict[str, Any]:
     flow_state       = _load_json(FLOW_STATE_PATH)
     evidence         = _load_json(EVIDENCE_PATH)
     persistence      = _load_json(PERSISTENCE_PATH)
+    model_registry   = _load_json(MODEL_REGISTRY_PATH)
     depth_memory     = _load_json(STATE_DIR / "latest_depth_liquidity_memory.json")
     wall_lifecycle   = _load_json(STATE_DIR / "latest_wall_lifecycle.json")
     context_sync     = _load_json(STATE_DIR / "latest_context_sync.json")
@@ -373,7 +379,7 @@ def run_decision_gate_engine() -> dict[str, Any]:
         try:
             result = compute_decision_gate(
                 trade_plan, scenario_trigger, setup_context, flow_state, evidence, persistence,
-                depth_memory, wall_lifecycle, context_sync,
+                model_registry, depth_memory, wall_lifecycle, context_sync,
             )
         except Exception:
             result = no_valid_output("COMPUTE_ERROR")
