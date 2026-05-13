@@ -637,6 +637,8 @@ def run_interpretation_engine() -> dict[str, Any]:
         base_score -= min(0.35, len(low_quality_timeframes) * 0.02)
     base_score = max(0.0, min(1.0, round(base_score, 4)))
     overall_level = _quality_level(base_score)
+    anchor = per_tf.get("1m") or next(iter(per_tf.values()))
+    anchor_raw = anchor.get("raw_context") or {}
 
     result: dict[str, Any] = {
         "timestamp_utc": _utc_now(),
@@ -648,6 +650,18 @@ def run_interpretation_engine() -> dict[str, Any]:
             "optional_input_files": [str(path).replace("\\", "/") for path in OPTIONAL_INPUT_PATHS.values()],
         },
         "current_price": current_price,
+        "footprint_summary": anchor.get("footprint_summary"),
+        "structure_summary": anchor.get("structure_summary"),
+        "liquidity_summary": anchor.get("liquidity_summary"),
+        "trend_summary": anchor.get("trend_summary"),
+        "pressure_summary": anchor.get("pressure_summary"),
+        "trap_summary": anchor.get("trap_summary"),
+        "scenario_summary": anchor.get("scenario_summary"),
+        "dominant_pressure": anchor_raw.get("cvd_state"),
+        "cvd_state": anchor_raw.get("cvd_state"),
+        "candle_label": anchor.get("candle_label"),
+        "liquidity_event": anchor_raw.get("liquidity_event"),
+        "interpretation_text": anchor.get("interpretation"),
         "summary": {
             "timeframes_total": len(TIMEFRAMES),
             "low_quality_timeframes": low_quality_timeframes,

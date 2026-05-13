@@ -1,0 +1,467 @@
+CANONICAL_RUNTIME_STARTED pid=29464 canonical=run_loop.py timestamp=2026-05-13T12:17:55Z
+NurNova Pipeline Dongu Basliyor... (v4)
+Proje: C:\Users\Nurtac\projects\nurnova-workspace\nurnova-simple-robust-engine
+Her 1 saniyede bir calisacak.
+Durdurmak icin Ctrl+C
+
+RUNTIME_HEARTBEAT loop=1 timestamp=2026-05-13T12:17:55Z
+
+============================================================
+  DONGU #1  |  2026-05-13T12:17:56Z
+============================================================
+  Pipeline : COMPLETE
+  Bloklar  : 47/47 PASSED
+  Veri     : MEDIUM (skor=0.6)
+  Uyari    : LEGACY_STATE_PRESENT_BUT_IGNORED
+  [DEGRADED] S0_CONTEXT_SYNC
+  [DEGRADED] MTF_CANDLE_DNA_FACTORY
+  [DEGRADED] MOMENTUM_CONTINUATION_ENGINE
+  [DEGRADED] S15_FLOW_TO_SETUP_CONTEXT
+  [DEGRADED] DAF_DELTA_ABSORPTION_FAILURE
+  [DEGRADED] S16_SCENARIO_ENTRY_TRIGGER
+  [DEGRADED] S17_TRADE_PLAN_ENGINE
+  [DEGRADED] S18_DECISION_GATE
+  [DEGRADED] S22_EDGE_MATRIX_V2
+  Fiyat    : 81162.41 USDT
+  OBS      : winner=SELLERS | delta=0.00675 | spread=0.01
+  VOL      : buy=0.00675 sell=0 delta=0.00675 cum_delta=0.20925 imbalance=null
+  DNA      : 1s=BALANCED | 1m=BALANCED | 5m=BALANCED
+  MTF      : produced=12/12 | quality=LOW
+  CAT      : 1m=UNKNOWN | 5m=UNKNOWN | 15m=UNKNOWN
+  ATR      : 1m=0 5m=0 15m=0 quality=OK/OK/OK
+  STR      : 1m=EQH | 5m=EQH | 15m=EQH | 1h=EQH
+  LIQ      : near=5 mid=0 far=0 | top=untested_high@81162.41 / untested_low@81162.41
+  INT      : 1m=UNKNOWN | structure=RANGE | note=BUY_PRESSURE
+  SCN      : bull=? reclaim->? | bear=81127.77 breakdown->81127.76 | neutral=range unresolved
+  BIZ      : value=INSIDE_VALUE | poc=81162.41 | auction=ACCEPTANCE
+  REG      : mode=BALANCE_MODE | day=BALANCED_DAY | bias=NEUTRAL
+  INTENT   : iceberg=False spoof=False trapped=BUYERS intent=BREAKOUT
+  POS      : crowded=UNKNOWN funding=MISSING oi=MISSING squeeze=LONG_SQUEEZE_RISK
+  SETUP_FAM: momentum=False trap=True double_dist=False
+  CTX      : dominant=TRAP_REVERSAL | ready=True | missing=MATCHING_CANDLE_CATEGORY_MISSING
+  SEMANTIC : WARN errors=0 contradictions=2
+  MODELS   : raw=38 valid=34 blocked_semantic=4 top=DAF_SHORT
+  CLUST     : clusters=24 allowed=24 cooldown_blocked=0
+  SETUP_ACT : family=TRAP_REVERSAL dir=SHORT score=0.9 ready=True missing=MATCHING_CANDLE_CATEGORY_MISSING
+  PAPER     : opened=0 open=3 closed=176
+  EDGE     : best=AR01_SHORT sample=5 winrate=0 expectancy=0 maturity=SAMPLE_BUILDING
+  Setup    : WATCH_SETUP | NEUTRAL | Grade=WATCH | skor=25.0 | MIXED | risk=MEDIUM | src=FLOW_STATE_LIVE
+  Olasilik : LONG=56.2% SHORT=43.8% | Sinif=NO_SIGNAL | Sinyal=NO
+  Plan     : NO_ACTIONABLE_PLAN | NEUTRAL | entry=None sl=None tp1=None RR=None
+  Gate     : BLOCK | DEPTH_VETO_SWEEP_RISK_IMMINENT
+  Paper    : NO_LIFECYCLE | NEUTRAL | entry=None tp1=None sl=None
+             tp1_hit=False | sl_hit=False | R=None
+  Outcome  : NO_OUTCOME | NO_LIFECYCLE
+  Edge     : usable_closed=0 | NO_EDGE_CLAIM | confidence=NONE
+  Kapanan  : 4 trade (closed_outcomes_with_lineage.jsonl)
+============================================================
+CANONICAL_RUNTIME_STOPPED pid=29464 canonical=run_loop.py timestamp=2026-05-13T12:17:56Z
+CANONICAL_RUNTIME_STARTED pid=17976 canonical=run_loop.py timestamp=2026-05-13T12:19:36Z
+NurNova Pipeline Dongu Basliyor... (v4)
+Proje: C:\Users\Nurtac\projects\nurnova-workspace\nurnova-simple-robust-engine
+Her 1 saniyede bir calisacak.
+Durdurmak icin Ctrl+C
+
+RUNTIME_HEARTBEAT loop=1 timestamp=2026-05-13T12:19:36Z
+
+============================================================
+  DONGU #1  |  2026-05-13T12:19:36Z
+============================================================
+  Pipeline : COMPLETE
+  Bloklar  : 47/47 PASSED
+  Veri     : MEDIUM (skor=0.6)
+  Uyari    : LEGACY_STATE_PRESENT_BUT_IGNORED
+  [DEGRADED] S0_CONTEXT_SYNC
+  [DEGRADED] MTF_CANDLE_DNA_FACTORY
+  [DEGRADED] MOMENTUM_CONTINUATION_ENGINE
+  [DEGRADED] S15_FLOW_TO_SETUP_CONTEXT
+  [DEGRADED] DAF_DELTA_ABSORPTION_FAILURE
+  [DEGRADED] S16_SCENARIO_ENTRY_TRIGGER
+  [DEGRADED] S17_TRADE_PLAN_ENGINE
+  [DEGRADED] S18_DECISION_GATE
+  [DEGRADED] S22_EDGE_MATRIX_V2
+  Fiyat    : 81162.41 USDT
+  OBS      : winner=SELLERS | delta=0.00675 | spread=0.01
+  VOL      : buy=0.00675 sell=0 delta=0.00675 cum_delta=0.216 imbalance=null
+  DNA      : 1s=BALANCED | 1m=BALANCED | 5m=BALANCED
+  MTF      : produced=12/12 | quality=LOW
+  CAT      : 1m=UNKNOWN | 5m=UNKNOWN | 15m=UNKNOWN
+  ATR      : 1m=0 5m=0 15m=0 quality=OK/OK/OK
+  STR      : 1m=EQH | 5m=EQH | 15m=EQH | 1h=EQH
+  LIQ      : near=5 mid=0 far=0 | top=untested_high@81162.41 / untested_low@81162.41
+  INT      : 1m=UNKNOWN | structure=RANGE | note=BUY_PRESSURE
+  SCN      : bull=? reclaim->? | bear=81127.77 breakdown->81127.76 | neutral=range unresolved
+  BIZ      : value=INSIDE_VALUE | poc=81162.41 | auction=ACCEPTANCE
+  REG      : mode=BALANCE_MODE | day=BALANCED_DAY | bias=NEUTRAL
+  INTENT   : iceberg=False spoof=False trapped=BUYERS intent=BREAKOUT
+  POS      : crowded=UNKNOWN funding=MISSING oi=MISSING squeeze=LONG_SQUEEZE_RISK
+  SETUP_FAM: momentum=False trap=True double_dist=False
+  CTX      : dominant=TRAP_REVERSAL | ready=True | missing=MATCHING_CANDLE_CATEGORY_MISSING
+  SEMANTIC : WARN errors=0 contradictions=2
+  MODELS   : raw=38 valid=34 blocked_semantic=4 top=DAF_SHORT
+  CLUST     : clusters=24 allowed=24 cooldown_blocked=0
+  SETUP_ACT : family=TRAP_REVERSAL dir=SHORT score=0.9 ready=True missing=MATCHING_CANDLE_CATEGORY_MISSING
+  PAPER     : opened=0 open=3 closed=176
+  EDGE     : best=AR01_SHORT sample=5 winrate=0 expectancy=0 maturity=SAMPLE_BUILDING
+  Setup    : WATCH_SETUP | NEUTRAL | Grade=WATCH | skor=25.0 | MIXED | risk=MEDIUM | src=FLOW_STATE_LIVE
+  Olasilik : LONG=56.2% SHORT=43.8% | Sinif=NO_SIGNAL | Sinyal=NO
+  Plan     : NO_ACTIONABLE_PLAN | NEUTRAL | entry=None sl=None tp1=None RR=None
+  Gate     : BLOCK | DEPTH_VETO_SWEEP_RISK_IMMINENT
+  Paper    : NO_LIFECYCLE | NEUTRAL | entry=None tp1=None sl=None
+             tp1_hit=False | sl_hit=False | R=None
+  Outcome  : NO_OUTCOME | NO_LIFECYCLE
+  Edge     : usable_closed=0 | NO_EDGE_CLAIM | confidence=NONE
+  Kapanan  : 4 trade (closed_outcomes_with_lineage.jsonl)
+============================================================
+CANONICAL_RUNTIME_STOPPED pid=17976 canonical=run_loop.py timestamp=2026-05-13T12:19:36Z
+CANONICAL_RUNTIME_STARTED pid=31096 canonical=run_loop.py timestamp=2026-05-13T12:20:18Z
+NurNova Pipeline Dongu Basliyor... (v4)
+Proje: C:\Users\Nurtac\projects\nurnova-workspace\nurnova-simple-robust-engine
+Her 1 saniyede bir calisacak.
+Durdurmak icin Ctrl+C
+
+RUNTIME_HEARTBEAT loop=1 timestamp=2026-05-13T12:20:18Z
+
+============================================================
+  DONGU #1  |  2026-05-13T12:20:19Z
+============================================================
+  Pipeline : COMPLETE
+  Bloklar  : 47/47 PASSED
+  Veri     : MEDIUM (skor=0.6)
+  Uyari    : LEGACY_STATE_PRESENT_BUT_IGNORED
+  [DEGRADED] S0_CONTEXT_SYNC
+  [DEGRADED] MTF_CANDLE_DNA_FACTORY
+  [DEGRADED] MOMENTUM_CONTINUATION_ENGINE
+  [DEGRADED] S15_FLOW_TO_SETUP_CONTEXT
+  [DEGRADED] DAF_DELTA_ABSORPTION_FAILURE
+  [DEGRADED] S16_SCENARIO_ENTRY_TRIGGER
+  [DEGRADED] S17_TRADE_PLAN_ENGINE
+  [DEGRADED] S18_DECISION_GATE
+  [DEGRADED] S22_EDGE_MATRIX_V2
+  Fiyat    : 81162.41 USDT
+  OBS      : winner=SELLERS | delta=0.00675 | spread=0.01
+  VOL      : buy=0.00675 sell=0 delta=0.00675 cum_delta=0.22275 imbalance=null
+  DNA      : 1s=BALANCED | 1m=BALANCED | 5m=BALANCED
+  MTF      : produced=12/12 | quality=LOW
+  CAT      : 1m=UNKNOWN | 5m=UNKNOWN | 15m=UNKNOWN
+  ATR      : 1m=0 5m=0 15m=0 quality=OK/OK/OK
+  STR      : 1m=EQH | 5m=EQH | 15m=EQH | 1h=EQH
+  LIQ      : near=5 mid=0 far=0 | top=untested_high@81162.41 / untested_low@81162.41
+  INT      : 1m=UNKNOWN | structure=RANGE | note=BUY_PRESSURE
+  SCN      : bull=? reclaim->? | bear=81127.77 breakdown->81127.76 | neutral=range unresolved
+  BIZ      : value=INSIDE_VALUE | poc=81162.41 | auction=ACCEPTANCE
+  REG      : mode=BALANCE_MODE | day=BALANCED_DAY | bias=NEUTRAL
+  INTENT   : iceberg=False spoof=False trapped=BUYERS intent=BREAKOUT
+  POS      : crowded=UNKNOWN funding=MISSING oi=MISSING squeeze=LONG_SQUEEZE_RISK
+  SETUP_FAM: momentum=False trap=True double_dist=False
+  CTX      : dominant=TRAP_REVERSAL | ready=True | missing=MATCHING_CANDLE_CATEGORY_MISSING
+  SEMANTIC : WARN errors=0 contradictions=2
+  MODELS   : raw=38 valid=34 blocked_semantic=4 top=DAF_SHORT
+  CLUST     : clusters=24 allowed=24 cooldown_blocked=0
+  SETUP_ACT : family=TRAP_REVERSAL dir=SHORT score=0.9 ready=True missing=MATCHING_CANDLE_CATEGORY_MISSING
+  PAPER     : opened=0 open=3 closed=176
+  EDGE     : best=AR01_SHORT sample=5 winrate=0 expectancy=0 maturity=SAMPLE_BUILDING
+  Setup    : WATCH_SETUP | NEUTRAL | Grade=WATCH | skor=25.0 | MIXED | risk=MEDIUM | src=FLOW_STATE_LIVE
+  Olasilik : LONG=56.2% SHORT=43.8% | Sinif=NO_SIGNAL | Sinyal=NO
+  Plan     : NO_ACTIONABLE_PLAN | NEUTRAL | entry=None sl=None tp1=None RR=None
+  Gate     : BLOCK | DEPTH_VETO_SWEEP_RISK_IMMINENT
+  Paper    : NO_LIFECYCLE | NEUTRAL | entry=None tp1=None sl=None
+             tp1_hit=False | sl_hit=False | R=None
+  Outcome  : NO_OUTCOME | NO_LIFECYCLE
+  Edge     : usable_closed=0 | NO_EDGE_CLAIM | confidence=NONE
+  Kapanan  : 4 trade (closed_outcomes_with_lineage.jsonl)
+============================================================
+CANONICAL_RUNTIME_STOPPED pid=31096 canonical=run_loop.py timestamp=2026-05-13T12:20:19Z
+CANONICAL_RUNTIME_STARTED pid=3416 canonical=run_loop.py timestamp=2026-05-13T12:21:04Z
+NurNova Pipeline Dongu Basliyor... (v4)
+Proje: C:\Users\Nurtac\projects\nurnova-workspace\nurnova-simple-robust-engine
+Her 10 saniyede bir calisacak.
+Durdurmak icin Ctrl+C
+
+RUNTIME_HEARTBEAT loop=1 timestamp=2026-05-13T12:21:04Z
+
+============================================================
+  DONGU #1  |  2026-05-13T12:21:04Z
+============================================================
+  Pipeline : COMPLETE
+  Bloklar  : 47/47 PASSED
+  Veri     : MEDIUM (skor=0.6)
+  Uyari    : LEGACY_STATE_PRESENT_BUT_IGNORED
+  [DEGRADED] S0_CONTEXT_SYNC
+  [DEGRADED] MTF_CANDLE_DNA_FACTORY
+  [DEGRADED] MOMENTUM_CONTINUATION_ENGINE
+  [DEGRADED] S15_FLOW_TO_SETUP_CONTEXT
+  [DEGRADED] DAF_DELTA_ABSORPTION_FAILURE
+  [DEGRADED] S16_SCENARIO_ENTRY_TRIGGER
+  [DEGRADED] S17_TRADE_PLAN_ENGINE
+  [DEGRADED] S18_DECISION_GATE
+  [DEGRADED] S22_EDGE_MATRIX_V2
+  Fiyat    : 81162.41 USDT
+  OBS      : winner=SELLERS | delta=0.00675 | spread=0.01
+  VOL      : buy=0.00675 sell=0 delta=0.00675 cum_delta=0.2295 imbalance=null
+  DNA      : 1s=BALANCED | 1m=BALANCED | 5m=BALANCED
+  MTF      : produced=12/12 | quality=LOW
+  CAT      : 1m=UNKNOWN | 5m=UNKNOWN | 15m=UNKNOWN
+  ATR      : 1m=0 5m=0 15m=0 quality=OK/OK/OK
+  STR      : 1m=EQH | 5m=EQH | 15m=EQH | 1h=EQH
+  LIQ      : near=5 mid=0 far=0 | top=untested_high@81162.41 / untested_low@81162.41
+  INT      : 1m=UNKNOWN | structure=RANGE | note=BUY_PRESSURE
+  SCN      : bull=? reclaim->? | bear=81127.77 breakdown->81127.76 | neutral=range unresolved
+  BIZ      : value=INSIDE_VALUE | poc=81162.41 | auction=ACCEPTANCE
+  REG      : mode=BALANCE_MODE | day=BALANCED_DAY | bias=NEUTRAL
+  INTENT   : iceberg=False spoof=False trapped=BUYERS intent=BREAKOUT
+  POS      : crowded=UNKNOWN funding=MISSING oi=MISSING squeeze=LONG_SQUEEZE_RISK
+  SETUP_FAM: momentum=False trap=True double_dist=False
+  CTX      : dominant=TRAP_REVERSAL | ready=True | missing=MATCHING_CANDLE_CATEGORY_MISSING
+  SEMANTIC : WARN errors=0 contradictions=2
+  MODELS   : raw=38 valid=34 blocked_semantic=4 top=DAF_SHORT
+  CLUST     : clusters=24 allowed=24 cooldown_blocked=0
+  SETUP_ACT : family=TRAP_REVERSAL dir=SHORT score=0.9 ready=True missing=MATCHING_CANDLE_CATEGORY_MISSING
+  PAPER     : opened=0 open=3 closed=176
+  EDGE     : best=AR01_SHORT sample=5 winrate=0 expectancy=0 maturity=SAMPLE_BUILDING
+  Setup    : WATCH_SETUP | NEUTRAL | Grade=WATCH | skor=25.0 | MIXED | risk=MEDIUM | src=FLOW_STATE_LIVE
+  Olasilik : LONG=56.2% SHORT=43.8% | Sinif=NO_SIGNAL | Sinyal=NO
+  Plan     : NO_ACTIONABLE_PLAN | NEUTRAL | entry=None sl=None tp1=None RR=None
+  Gate     : BLOCK | DEPTH_VETO_SWEEP_RISK_IMMINENT
+  Paper    : NO_LIFECYCLE | NEUTRAL | entry=None tp1=None sl=None
+             tp1_hit=False | sl_hit=False | R=None
+  Outcome  : NO_OUTCOME | NO_LIFECYCLE
+  Edge     : usable_closed=0 | NO_EDGE_CLAIM | confidence=NONE
+  Kapanan  : 4 trade (closed_outcomes_with_lineage.jsonl)
+============================================================
+RUNTIME_HEARTBEAT loop=2 timestamp=2026-05-13T12:21:14Z
+
+============================================================
+  DONGU #2  |  2026-05-13T12:21:15Z
+============================================================
+  Pipeline : COMPLETE
+  Bloklar  : 47/47 PASSED
+  Veri     : MEDIUM (skor=0.6)
+  Uyari    : LEGACY_STATE_PRESENT_BUT_IGNORED
+  [DEGRADED] S0_CONTEXT_SYNC
+  [DEGRADED] MTF_CANDLE_DNA_FACTORY
+  [DEGRADED] MOMENTUM_CONTINUATION_ENGINE
+  [DEGRADED] S15_FLOW_TO_SETUP_CONTEXT
+  [DEGRADED] DAF_DELTA_ABSORPTION_FAILURE
+  [DEGRADED] S16_SCENARIO_ENTRY_TRIGGER
+  [DEGRADED] S17_TRADE_PLAN_ENGINE
+  [DEGRADED] S18_DECISION_GATE
+  [DEGRADED] S22_EDGE_MATRIX_V2
+  Fiyat    : 81162.41 USDT
+  OBS      : winner=SELLERS | delta=0.00675 | spread=0.01
+  VOL      : buy=0.00675 sell=0 delta=0.00675 cum_delta=0.23625 imbalance=null
+  DNA      : 1s=BALANCED | 1m=BALANCED | 5m=BALANCED
+  MTF      : produced=12/12 | quality=LOW
+  CAT      : 1m=UNKNOWN | 5m=UNKNOWN | 15m=UNKNOWN
+  ATR      : 1m=0 5m=0 15m=0 quality=OK/OK/OK
+  STR      : 1m=EQH | 5m=EQH | 15m=EQH | 1h=EQH
+  LIQ      : near=5 mid=0 far=0 | top=untested_high@81162.41 / untested_low@81162.41
+  INT      : 1m=UNKNOWN | structure=RANGE | note=BUY_PRESSURE
+  SCN      : bull=? reclaim->? | bear=81127.77 breakdown->81127.76 | neutral=range unresolved
+  BIZ      : value=INSIDE_VALUE | poc=81162.41 | auction=ACCEPTANCE
+  REG      : mode=BALANCE_MODE | day=BALANCED_DAY | bias=NEUTRAL
+  INTENT   : iceberg=False spoof=False trapped=BUYERS intent=BREAKOUT
+  POS      : crowded=UNKNOWN funding=MISSING oi=MISSING squeeze=LONG_SQUEEZE_RISK
+  SETUP_FAM: momentum=False trap=True double_dist=False
+  CTX      : dominant=TRAP_REVERSAL | ready=True | missing=MATCHING_CANDLE_CATEGORY_MISSING
+  SEMANTIC : WARN errors=0 contradictions=2
+  MODELS   : raw=38 valid=34 blocked_semantic=4 top=DAF_SHORT
+  CLUST     : clusters=24 allowed=24 cooldown_blocked=0
+  SETUP_ACT : family=TRAP_REVERSAL dir=SHORT score=0.9 ready=True missing=MATCHING_CANDLE_CATEGORY_MISSING
+  PAPER     : opened=0 open=3 closed=176
+  EDGE     : best=AR01_SHORT sample=5 winrate=0 expectancy=0 maturity=SAMPLE_BUILDING
+  Setup    : WATCH_SETUP | NEUTRAL | Grade=WATCH | skor=25.0 | MIXED | risk=MEDIUM | src=FLOW_STATE_LIVE
+  Olasilik : LONG=58.2% SHORT=41.8% | Sinif=NO_SIGNAL | Sinyal=NO
+  Plan     : NO_ACTIONABLE_PLAN | NEUTRAL | entry=None sl=None tp1=None RR=None
+  Gate     : BLOCK | DEPTH_VETO_SWEEP_RISK_IMMINENT
+  Paper    : NO_LIFECYCLE | NEUTRAL | entry=None tp1=None sl=None
+             tp1_hit=False | sl_hit=False | R=None
+  Outcome  : NO_OUTCOME | NO_LIFECYCLE
+  Edge     : usable_closed=0 | NO_EDGE_CLAIM | confidence=NONE
+  Kapanan  : 4 trade (closed_outcomes_with_lineage.jsonl)
+============================================================
+CANONICAL_RUNTIME_STOPPED pid=3416 canonical=run_loop.py timestamp=2026-05-13T12:21:15Z
+CANONICAL_RUNTIME_STARTED pid=30344 canonical=run_loop.py timestamp=2026-05-13T13:54:56Z
+NurNova Pipeline Dongu Basliyor... (v4)
+Proje: C:\Users\Nurtac\projects\nurnova-workspace\nurnova-simple-robust-engine
+Her 1 saniyede bir calisacak.
+Durdurmak icin Ctrl+C
+
+RUNTIME_HEARTBEAT loop=1 timestamp=2026-05-13T13:54:56Z
+
+============================================================
+  DONGU #1  |  2026-05-13T13:54:57Z
+============================================================
+  Pipeline : COMPLETE
+  Bloklar  : 52/52 PASSED
+  Veri     : HIGH (skor=1.0)
+  Uyari    : LEGACY_STATE_PRESENT_BUT_IGNORED
+  [DEGRADED] MTF_CANDLE_DNA_FACTORY
+ACTIVE_CHAIN_FAILURE block=MTF_CANDLE_DNA_FACTORY reason=DEGRADED
+  [DEGRADED] MOMENTUM_CONTINUATION_ENGINE
+  [DEGRADED] RESEARCH_EDGE_MATRIX_ENGINE
+ACTIVE_CHAIN_FAILURE block=RESEARCH_EDGE_MATRIX_ENGINE reason=DEGRADED
+  [DEGRADED] S15_FLOW_TO_SETUP_CONTEXT
+  [DEGRADED] DAF_DELTA_ABSORPTION_FAILURE
+  [DEGRADED] S16_SCENARIO_ENTRY_TRIGGER
+  [DEGRADED] S17_TRADE_PLAN_ENGINE
+  [DEGRADED] S18_DECISION_GATE
+  [DEGRADED] S22_EDGE_MATRIX_V2
+RUNTIME_HEARTBEAT loop=1 timestamp=2026-05-13T13:54:57Z
+S0_SYNC : SYNC_OK context=CTX_BTCUSDT_2_C3360B4DED active_chain_ok=True mismatch=0 legacy_stale=4
+SETUP_ACT : family=TRAP_REVERSAL band=STRONG_ACTIVE score=0.9 ready=True
+PAPER : opened=2 open=4 closed=182 invalid=6
+EDGE : status=NO_CLOSED_SAMPLES samples=0 best=None expectancy=null
+FEEDBACK : best=None worst=None sample_building=0
+PROMOTION : watchlist=0 probation=0 paper_validated=0 live_diag=0 rejected=0
+LIVE_GATE : live_enabled=False eligible_diag=0 blocked=0
+SAFETY : live_order_sent=false private_api=false
+  Fiyat    : 81162.41 USDT
+  OBS      : winner=SELLERS | delta=0.00675 | spread=0.01
+  VOL      : buy=0.00675 sell=0 delta=0.00675 cum_delta=0.2565 imbalance=null
+  DNA      : 1s=BALANCED | 1m=BALANCED | 5m=BALANCED
+  MTF      : produced=12/12 | quality=LOW
+  CAT      : 1m=UNKNOWN | 5m=UNKNOWN | 15m=UNKNOWN
+  ATR      : 1m=0 5m=0 15m=0 quality=OK/OK/OK
+  STR      : 1m=EQH | 5m=EQH | 15m=EQH | 1h=EQH
+  LIQ      : near=5 mid=0 far=0 | top=untested_high@81162.41 / untested_low@81162.41
+  INT      : 1m=UNKNOWN | structure=RANGE | note=BUY_PRESSURE
+  SCN      : bull=? reclaim->? | bear=81127.77 breakdown->81127.76 | neutral=range unresolved
+  BIZ      : value=INSIDE_VALUE | poc=81162.41 | auction=ACCEPTANCE
+  REG      : mode=BALANCE_MODE | day=BALANCED_DAY | bias=NEUTRAL
+  INTENT   : iceberg=False spoof=False trapped=BUYERS intent=BREAKOUT
+  POS      : crowded=UNKNOWN funding=MISSING oi=MISSING squeeze=LONG_SQUEEZE_RISK
+  SETUP_FAM: momentum=False trap=True double_dist=False
+  CTX      : dominant=TRAP_REVERSAL | ready=True | missing=MATCHING_CANDLE_CATEGORY_MISSING
+  SEMANTIC : valid=31 mixed=4 hard_blocked=7
+  MODELS   : raw=38 valid=31 blocked_semantic=7 top=DAF_SHORT
+  CLUST     : clusters=21 allowed=21 cooldown_blocked=0
+  COOLDOWN : allowed=21 soft_allowed=1 blocked=0
+  SETUP_ACT: family=TRAP_REVERSAL dir=SHORT band=STRONG_ACTIVE score=0.9 ready=True risks=none
+  PAPER    : opened=2 open=4 closed=182 source=SETUP_FAMILY_ACTIVATION_READY
+  EDGE     : best=None sample=0 winrate=null expectancy=null maturity=UNKNOWN
+  Setup    : WATCH_SETUP | NEUTRAL | Grade=WATCH | skor=25.0 | MIXED | risk=MEDIUM | src=FLOW_STATE_LIVE
+  Olasilik : LONG=56.2% SHORT=43.8% | Sinif=NO_SIGNAL | Sinyal=NO
+  Plan     : NO_ACTIONABLE_PLAN | NEUTRAL | entry=None sl=None tp1=None RR=None
+  Gate     : BLOCK | DEPTH_VETO_SWEEP_RISK_IMMINENT
+  Paper    : NO_LIFECYCLE | NEUTRAL | entry=None tp1=None sl=None
+             tp1_hit=False | sl_hit=False | R=None
+  Outcome  : NO_OUTCOME | NO_LIFECYCLE
+  Edge     : usable_closed=0 | NO_EDGE_CLAIM | confidence=NONE
+  Kapanan  : 4 trade (closed_outcomes_with_lineage.jsonl)
+============================================================
+CANONICAL_RUNTIME_STOPPED pid=30344 canonical=run_loop.py timestamp=2026-05-13T13:54:57Z
+CANONICAL_RUNTIME_STARTED pid=20172 canonical=run_loop.py timestamp=2026-05-13T13:55:56Z
+NurNova Pipeline Dongu Basliyor... (v4)
+Proje: C:\Users\Nurtac\projects\nurnova-workspace\nurnova-simple-robust-engine
+Her 1 saniyede bir calisacak.
+Durdurmak icin Ctrl+C
+
+RUNTIME_HEARTBEAT loop=1 timestamp=2026-05-13T13:55:56Z
+
+============================================================
+  DONGU #1  |  2026-05-13T13:55:57Z
+============================================================
+  Pipeline : COMPLETE
+  Bloklar  : 52/52 PASSED
+  Veri     : HIGH (skor=1.0)
+  Uyari    : LEGACY_STATE_PRESENT_BUT_IGNORED
+  [DEGRADED] MTF_CANDLE_DNA_FACTORY
+ACTIVE_CHAIN_FAILURE block=MTF_CANDLE_DNA_FACTORY reason=DEGRADED
+  [DEGRADED] MOMENTUM_CONTINUATION_ENGINE
+  [DEGRADED] RESEARCH_EDGE_MATRIX_ENGINE
+ACTIVE_CHAIN_FAILURE block=RESEARCH_EDGE_MATRIX_ENGINE reason=DEGRADED
+  [DEGRADED] S15_FLOW_TO_SETUP_CONTEXT
+  [DEGRADED] DAF_DELTA_ABSORPTION_FAILURE
+  [DEGRADED] S16_SCENARIO_ENTRY_TRIGGER
+  [DEGRADED] S17_TRADE_PLAN_ENGINE
+  [DEGRADED] S18_DECISION_GATE
+  [DEGRADED] S22_EDGE_MATRIX_V2
+RUNTIME_HEARTBEAT loop=1 timestamp=2026-05-13T13:55:57Z
+S0_SYNC : SYNC_OK context=CTX_BTCUSDT_4_BC34E43940 active_chain_ok=True mismatch=0 legacy_stale=4
+SETUP_ACT : family=TRAP_REVERSAL band=STRONG_ACTIVE score=0.9 ready=True
+PAPER : opened=0 open=7 closed=182 invalid=6
+EDGE : status=NO_CLOSED_SAMPLES samples=0 best=None expectancy=null
+FEEDBACK : best=None worst=None sample_building=0
+PROMOTION : watchlist=0 probation=0 paper_validated=0 live_diag=0 rejected=0
+LIVE_GATE : live_enabled=False eligible_diag=0 blocked=0
+SAFETY : live_order_sent=false private_api=false
+  Fiyat    : 81162.41 USDT
+  OBS      : winner=SELLERS | delta=0.00675 | spread=0.01
+  VOL      : buy=0.00675 sell=0 delta=0.00675 cum_delta=0.27 imbalance=null
+  DNA      : 1s=BALANCED | 1m=BALANCED | 5m=BALANCED
+  MTF      : produced=12/12 | quality=LOW
+  CAT      : 1m=UNKNOWN | 5m=UNKNOWN | 15m=UNKNOWN
+  ATR      : 1m=0 5m=0 15m=0 quality=OK/OK/OK
+  STR      : 1m=EQH | 5m=EQH | 15m=EQH | 1h=EQH
+  LIQ      : near=5 mid=0 far=0 | top=untested_high@81162.41 / untested_low@81162.41
+  INT      : 1m=UNKNOWN | structure=RANGE | note=BUY_PRESSURE
+  SCN      : bull=? reclaim->? | bear=81127.77 breakdown->81127.76 | neutral=range unresolved
+  BIZ      : value=INSIDE_VALUE | poc=81162.41 | auction=ACCEPTANCE
+  REG      : mode=BALANCE_MODE | day=BALANCED_DAY | bias=NEUTRAL
+  INTENT   : iceberg=False spoof=False trapped=BUYERS intent=BREAKOUT
+  POS      : crowded=UNKNOWN funding=MISSING oi=MISSING squeeze=LONG_SQUEEZE_RISK
+  SETUP_FAM: momentum=False trap=True double_dist=False
+  CTX      : dominant=TRAP_REVERSAL | ready=True | missing=MATCHING_CANDLE_CATEGORY_MISSING
+  SEMANTIC : valid=31 mixed=4 hard_blocked=7
+  MODELS   : raw=38 valid=31 blocked_semantic=7 top=DAF_SHORT
+  CLUST     : clusters=21 allowed=21 cooldown_blocked=0
+  COOLDOWN : allowed=21 soft_allowed=1 blocked=0
+  SETUP_ACT: family=TRAP_REVERSAL dir=SHORT band=STRONG_ACTIVE score=0.9 ready=True risks=none
+  PAPER    : opened=0 open=7 closed=182 source=SETUP_FAMILY_ACTIVATION_READY
+  EDGE     : best=None sample=0 winrate=null expectancy=null maturity=UNKNOWN
+  Setup    : WATCH_SETUP | NEUTRAL | Grade=WATCH | skor=25.0 | MIXED | risk=MEDIUM | src=FLOW_STATE_LIVE
+  Olasilik : LONG=56.2% SHORT=43.8% | Sinif=NO_SIGNAL | Sinyal=NO
+  Plan     : NO_ACTIONABLE_PLAN | NEUTRAL | entry=None sl=None tp1=None RR=None
+  Gate     : BLOCK | DEPTH_VETO_SWEEP_RISK_IMMINENT
+  Paper    : NO_LIFECYCLE | NEUTRAL | entry=None tp1=None sl=None
+             tp1_hit=False | sl_hit=False | R=None
+  Outcome  : NO_OUTCOME | NO_LIFECYCLE
+  Edge     : usable_closed=0 | NO_EDGE_CLAIM | confidence=NONE
+  Kapanan  : 4 trade (closed_outcomes_with_lineage.jsonl)
+============================================================
+CANONICAL_RUNTIME_STOPPED pid=20172 canonical=run_loop.py timestamp=2026-05-13T13:55:57Z
+CANONICAL_RUNTIME_STARTED pid=6372 canonical=run_loop.py timestamp=2026-05-13T14:45:52Z
+NurNova Pipeline Dongu Basliyor... (v4)
+Proje: C:\Users\Nurtac\projects\nurnova-workspace\nurnova-simple-robust-engine
+Her 30 saniyede bir calisacak.
+Durdurmak icin Ctrl+C
+
+RUNTIME_HEARTBEAT loop=1 timestamp=2026-05-13T14:45:52Z
+
+============================================================
+  DONGU #1  |  2026-05-13T14:46:59Z
+============================================================
+  Pipeline : COMPLETE
+  Bloklar  : 54/54 PASSED
+  Veri     : HIGH (skor=1.0)
+  Uyari    : LEGACY_STATE_PRESENT_BUT_IGNORED
+  [DEGRADED] MTF_CANDLE_DNA_FACTORY
+ACTIVE_CHAIN_FAILURE block=MTF_CANDLE_DNA_FACTORY reason=DEGRADED
+  [DEGRADED] MOMENTUM_CONTINUATION_ENGINE
+  [DEGRADED] S15_FLOW_TO_SETUP_CONTEXT
+  [DEGRADED] DAF_DELTA_ABSORPTION_FAILURE
+  [DEGRADED] S16_SCENARIO_ENTRY_TRIGGER
+  [DEGRADED] S17_TRADE_PLAN_ENGINE
+  [DEGRADED] S18_DECISION_GATE
+  [DEGRADED] S22_EDGE_MATRIX_V2
+RUNTIME_HEARTBEAT loop=1 timestamp=2026-05-13T14:46:59Z
+S0_SYNC : SYNC_OK active_chain_ok=True context=CTX_BTCUSDT_6_F00DCF7657 mismatch=0
+OBS : price=81162.41 delta=0.00675 spread=0.01
+DNA : 1m=UNKNOWN 5m=UNKNOWN 15m=UNKNOWN
+STRUCT : 1m=EQH 5m=EQH 15m=EQH
+LIQ : near=5 mid=0 far=0
+SEMANTIC : valid=31 mixed=4 hard_blocked=7
+CLUST : clusters=21 allowed=21 cooldown=0
+SETUP_ACT : family=TRAP_REVERSAL band=STRONG_ACTIVE score=0.9 ready=True
+PAPER : opened=3 open=5 closed=189 invalid=6
+PAPER_SAFE : conflict_blocked=0 open_limit_blocked=0 family_limit_blocked=0
+EDGE : status=SAMPLE_BUILDING samples=7 best=DAF_SHORT expectancy=null
+FEEDBACK : best=DAF_SHORT worst=DAF_SHORT sample_building=4
+PROMOTION : watchlist=0 probation=0 paper_validated=0 live_diag=0 rejected=0
+LIVE_GATE : live_enabled=False eligible_diag=False blocked=0
+AUDIT : status=DEGRADED score=68 critical=0 warnings=8
+QUERY : ready=True bottleneck=CLEAN_SAMPLE_ACCUMULATION
+SAFETY : live_order_sent=false private_api=false
+============================================================
+CANONICAL_RUNTIME_STOPPED pid=6372 canonical=run_loop.py timestamp=2026-05-13T14:46:59Z

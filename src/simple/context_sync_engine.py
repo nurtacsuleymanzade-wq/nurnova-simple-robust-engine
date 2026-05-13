@@ -1,379 +1,315 @@
-"""Context Sync Engine — NOVA SIMPLE ROBUST ENGINE v1.
-
-Her pipeline calismasinda:
-1. Benzersiz context_id uretir (tum bloklar bunu tasir)
-2. Tum input dosyalarin yasini kontrol eder
-3. Eski/stale dosyalari isaretler
-4. Lineage zinciri kurar
-
-Bu engine pipeline'in en basinda calisir.
-Hicbir veri uretmez, hicbir trade acmaz.
-Sadece "bu pipeline calistirmasinin tum bloklar
-ayni zaman penceresine mi ait?" sorusuna cevap verir.
-
-safe_to_open_real_trade always False.
-"""
-
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# Kac saniyeden eski dosya STALE sayilir?
-MAX_AGE_FRESH_S  =  30   # 0-30s  → FRESH
-MAX_AGE_RECENT_S = 120   # 31-120s → RECENT
-MAX_AGE_STALE_S  = 300   # 121-300s → STALE
-# 300s+ → VERY_STALE → blogu gecersiz say
+from src.simple.research_runtime import (
+    RUNTIME_CONTEXT_PATH,
+    current_runtime_context,
+    initialize_runtime_context,
+    load_json,
+    parse_ts,
+    stamp_payload,
+    utc_now,
+    write_json,
+)
 
-# Kritik bloklar: bunlar STALE olursa pipeline durdurulmali
-CRITICAL_BLOCKS = {
-    "flow_state",
-    "flow_evidence",
-    "flow_persistence",
-    "market_truth",
+STATE_DIR = Path("state/simple")
+OUTPUT_PATH = STATE_DIR / "latest_context_sync.json"
+S0_STATE_PATH = STATE_DIR / "s0_context_sync_state.json"
+
+ACTIVE_CHAIN_FILES: dict[str, Path] = {
+    "RUNTIME_CONTEXT": RUNTIME_CONTEXT_PATH,
+    "OBSERVATION_FACTORY": STATE_DIR / "latest_observation_factory.json",
+    "MTF_CANDLE_DNA_FACTORY": STATE_DIR / "latest_mtf_candle_dna.json",
+    "ATR_ENGINE": STATE_DIR / "latest_atr_state.json",
+    "MARKET_STRUCTURE_ENGINE": STATE_DIR / "latest_market_structure.json",
+    "LIQUIDITY_MAP_ENGINE": STATE_DIR / "latest_liquidity_map.json",
+    "INTERPRETATION_ENGINE": STATE_DIR / "latest_interpretation.json",
+    "THREE_SCENARIO_ENGINE": STATE_DIR / "latest_three_scenarios.json",
+    "BUSINESS_ZONE_ENGINE": STATE_DIR / "latest_business_zone.json",
+    "MARKET_REGIME_CLASSIFIER": STATE_DIR / "latest_market_regime.json",
+    "INTENT_ENGINE": STATE_DIR / "latest_intent_analysis.json",
+    "UNIFIED_CONTEXT_ENGINE": STATE_DIR / "latest_unified_context.json",
+    "MODEL_DEFINITION_REGISTRY": STATE_DIR / "latest_model_definitions.json",
+    "MODEL_HUNTER_ENGINE": STATE_DIR / "latest_model_hunter.json",
+    "MODEL_SEMANTIC_VALIDATOR": STATE_DIR / "latest_model_semantic_validation.json",
+    "MODEL_CLUSTER_ENGINE": STATE_DIR / "latest_model_clusters.json",
+    "MODEL_COOLDOWN_ENGINE": STATE_DIR / "latest_model_cooldown.json",
+    "SETUP_FAMILY_ACTIVATION_ENGINE": STATE_DIR / "latest_setup_family_activation.json",
+    "PAPER_TRADE_FACTORY": STATE_DIR / "latest_paper_trade_factory.json",
+    "RESEARCH_PAPER_LIFECYCLE_ENGINE": STATE_DIR / "latest_research_paper_lifecycle.json",
+    "RESEARCH_EDGE_MATRIX_ENGINE": STATE_DIR / "latest_research_edge_matrix.json",
+    "MODEL_FEEDBACK_DIAGNOSTIC": STATE_DIR / "latest_model_feedback.json",
+    "MODEL_PROMOTION_ENGINE": STATE_DIR / "latest_model_promotion.json",
+    "LIVE_ELIGIBILITY_GATE_DIAGNOSTIC": STATE_DIR / "latest_live_eligibility_gate.json",
+    "SYSTEM_AUDITOR_ENGINE": STATE_DIR / "latest_system_audit.json",
+    "SYSTEM_QUERY_STATE_BUILDER": STATE_DIR / "latest_system_query_state.json",
 }
 
-# Tum input dosyalari
-INPUT_FILES = {
-    "market_truth":      Path("state/simple/latest_market_truth.json"),
-    "flow_state":        Path("state/simple/latest_flow_state.json"),
-    "flow_evidence":     Path("state/simple/latest_flow_evidence.json"),
-    "flow_persistence":  Path("state/simple/latest_flow_persistence.json"),
-    "setup_context":     Path("state/simple/latest_setup_context.json"),
-    "setup_candidate":   Path("state/simple/latest_setup_candidate.json"),
-    "scenario_trigger":  Path("state/simple/latest_scenario_trigger.json"),
-    "trade_plan":        Path("state/simple/latest_trade_plan.json"),
-    "hybrid_candle_dna": Path("state/simple/latest_hybrid_candle_dna.json"),
-    "depth_memory":      Path("state/simple/latest_depth_liquidity_memory.json"),
-    "1s_evidence":       Path("state/simple/latest_1s_evidence.json"),
+LEGACY_BRIDGE_FILES: dict[str, Path] = {
+    "S15_FLOW_TO_SETUP_CONTEXT": STATE_DIR / "latest_setup_context.json",
+    "S16_SCENARIO_ENTRY_TRIGGER": STATE_DIR / "latest_scenario_trigger.json",
+    "S17_TRADE_PLAN": STATE_DIR / "latest_trade_plan.json",
+    "S18_DECISION_GATE": STATE_DIR / "latest_decision_gate.json",
+    "S20_PAPER_LIFECYCLE": STATE_DIR / "latest_paper_lifecycle.json",
+    "S21_OUTCOME_MONITOR": STATE_DIR / "latest_outcome_monitor.json",
+    "S22_EDGE_MATRIX_V2": STATE_DIR / "latest_edge_matrix_v2.json",
 }
 
-OUTPUT_PATH = Path("state/simple/latest_context_sync.json")
-S0_STATE_PATH = Path("state/simple/s0_context_sync_state.json")
+CRITICAL_ACTIVE_BLOCKS = {
+    "OBSERVATION_FACTORY",
+    "MTF_CANDLE_DNA_FACTORY",
+    "UNIFIED_CONTEXT_ENGINE",
+    "MODEL_HUNTER_ENGINE",
+    "SETUP_FAMILY_ACTIVATION_ENGINE",
+    "PAPER_TRADE_FACTORY",
+    "RESEARCH_PAPER_LIFECYCLE_ENGINE",
+    "RESEARCH_EDGE_MATRIX_ENGINE",
+    "SYSTEM_AUDITOR_ENGINE",
+    "SYSTEM_QUERY_STATE_BUILDER",
+}
+
+MAX_ACTIVE_DRIFT_SECONDS = 180.0
+MAX_LEGACY_STALE_SECONDS = 900.0
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def active_chain_declaration() -> list[str]:
+    return list(ACTIVE_CHAIN_FILES)
 
 
-def _now_dt() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _load_json(path: Path) -> dict[str, Any] | None:
-    try:
-        if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return None
-
-
-def _parse_ts(ts_str: str | None) -> datetime | None:
-    if not ts_str:
+def _seconds_between(left: datetime | None, right: datetime | None) -> float | None:
+    if left is None or right is None:
         return None
-    try:
-        ts_str = ts_str.replace("Z", "+00:00")
-        return datetime.fromisoformat(ts_str)
-    except Exception:
-        return None
+    return abs((left - right).total_seconds())
 
 
-def _age_seconds(ts_str: str | None, now: datetime) -> float | None:
-    dt = _parse_ts(ts_str)
-    if dt is None:
-        return None
-    try:
-        return max(0.0, (now - dt).total_seconds())
-    except Exception:
-        return None
-
-
-def _freshness_label(age_s: float | None) -> str:
-    if age_s is None:
-        return "UNKNOWN"
-    if age_s <= MAX_AGE_FRESH_S:
-        return "FRESH"
-    if age_s <= MAX_AGE_RECENT_S:
-        return "RECENT"
-    if age_s <= MAX_AGE_STALE_S:
-        return "STALE"
-    return "VERY_STALE"
-
-
-def _generate_context_id(now: datetime) -> str:
-    """
-    Benzersiz context_id.
-    Format: CTX_BTCUSDT_YYYYMMDD_HHMMSS_HASH4
-    Hash: son 4 karakter benzersizlik icin.
-    """
-    ts_str = now.strftime("%Y%m%d_%H%M%S")
-    hash4 = hashlib.md5(ts_str.encode()).hexdigest()[:4].upper()
-    return f"CTX_BTCUSDT_{ts_str}_{hash4}"
-
-
-def _check_all_inputs(now: datetime) -> dict[str, Any]:
-    """Tum input dosyalari kontrol et."""
-    results = {}
-    stale_critical = []
-    stale_non_critical = []
-    missing = []
-
-    for name, path in INPUT_FILES.items():
-        data = _load_json(path)
-
-        if data is None:
-            results[name] = {
-                "path":       str(path),
-                "exists":     False,
-                "age_s":      None,
-                "freshness":  "MISSING",
-                "timestamp":  None,
-                "is_critical": name in CRITICAL_BLOCKS,
-            }
-            if name in CRITICAL_BLOCKS:
-                missing.append(name)
-            continue
-
-        ts = data.get("timestamp_utc")
-        age_s = _age_seconds(ts, now)
-        freshness = _freshness_label(age_s)
-
-        results[name] = {
-            "path":        str(path),
-            "exists":      True,
-            "age_s":       round(age_s, 1) if age_s is not None else None,
-            "freshness":   freshness,
-            "timestamp":   ts,
-            "is_critical": name in CRITICAL_BLOCKS,
-        }
-
-        if freshness in ("STALE", "VERY_STALE"):
-            if name in CRITICAL_BLOCKS:
-                stale_critical.append(name)
-            else:
-                stale_non_critical.append(name)
-
-    return {
-        "inputs":              results,
-        "stale_critical":      stale_critical,
-        "stale_non_critical":  stale_non_critical,
-        "missing_critical":    missing,
-    }
-
-
-def _determine_sync_status(check: dict[str, Any]) -> str:
-    """
-    Pipeline bu context_id ile guvenle calisabilir mi?
-
-    SYNC_OK:       Tum kritik dosyalar FRESH veya RECENT
-    SYNC_DEGRADED: Bazi kritik dosyalar STALE ama calisiyor
-    SYNC_BROKEN:   Kritik dosya VERY_STALE veya MISSING
-    """
-    missing    = check["missing_critical"]
-    stale_crit = check["stale_critical"]
-
-    if missing:
-        return "SYNC_BROKEN"
-
-    # Very_stale kontrolu
-    for name in CRITICAL_BLOCKS:
-        item = check["inputs"].get(name, {})
-        if item.get("freshness") == "VERY_STALE":
-            return "SYNC_BROKEN"
-
-    if stale_crit:
-        return "SYNC_DEGRADED"
-
-    return "SYNC_OK"
-
-
-def _find_oldest_critical(check: dict[str, Any]) -> dict[str, Any]:
-    """Kritik bloklar arasinda en eski hangisi?"""
-    oldest_age  = -1.0
-    oldest_name = None
-    oldest_ts   = None
-
-    for name in CRITICAL_BLOCKS:
-        item = check["inputs"].get(name, {})
-        age = item.get("age_s")
-        if age is not None and age > oldest_age:
-            oldest_age  = age
-            oldest_name = name
-            oldest_ts   = item.get("timestamp")
-
-    return {
-        "name":       oldest_name,
-        "age_s":      round(oldest_age, 1) if oldest_age >= 0 else None,
-        "timestamp":  oldest_ts,
-    }
-
-
-def _build_lineage_anchor(
-    context_id: str,
-    check: dict[str, Any],
-    now: datetime,
+def _inspect_file(
+    block_id: str,
+    path: Path,
+    expected_context_id: str,
+    expected_loop_id: int,
+    loop_started_at: datetime | None,
+    critical: bool,
 ) -> dict[str, Any]:
-    """
-    Her trade zinciri bu anchor'dan baslayacak.
-    Hangi context_id altinda hangi inputlar kullanildi?
-    """
+    payload = load_json(path)
+    item = {
+        "block_id": block_id,
+        "path": str(path),
+        "critical": critical,
+        "exists": payload is not None,
+        "corrupted": False,
+        "context_id": None,
+        "loop_id": None,
+        "timestamp_utc": None,
+        "age_seconds": None,
+        "status": "OK",
+        "reasons": [],
+    }
+    if payload is None:
+        item["status"] = "MISSING"
+        item["reasons"].append("MISSING")
+        return item
+
+    ts = parse_ts(payload.get("timestamp_utc"))
+    item["timestamp_utc"] = payload.get("timestamp_utc")
+    item["context_id"] = payload.get("context_id")
+    item["loop_id"] = payload.get("loop_id")
+    if ts is None:
+        item["status"] = "CORRUPTED"
+        item["corrupted"] = True
+        item["reasons"].append("TIMESTAMP_INVALID")
+    elif loop_started_at is not None:
+        age = _seconds_between(ts, datetime.now(timezone.utc))
+        item["age_seconds"] = round(age, 3) if age is not None else None
+        drift = _seconds_between(ts, loop_started_at)
+        if drift is not None and drift > MAX_ACTIVE_DRIFT_SECONDS:
+            item["status"] = "STALE"
+            item["reasons"].append(f"TIMESTAMP_DRIFT_{round(drift, 3)}")
+
+    if payload.get("context_id") != expected_context_id:
+        item["reasons"].append("CONTEXT_ID_MISMATCH")
+        item["status"] = "MISMATCH"
+    if int(payload.get("loop_id") or -1) != int(expected_loop_id):
+        item["reasons"].append("LOOP_ID_MISMATCH")
+        item["status"] = "MISMATCH"
+    if payload.get("block_id") != block_id:
+        item["reasons"].append("BLOCK_ID_MISMATCH")
+        item["status"] = "MISMATCH"
+    if not payload.get("context_id"):
+        item["reasons"].append("CONTEXT_ID_MISSING")
+        item["status"] = "MISSING_CONTEXT"
+    return item
+
+
+def _inspect_legacy_file(path: Path, context_id: str, loop_id: int, loop_started_at: datetime | None) -> dict[str, Any] | None:
+    payload = load_json(path)
+    if payload is None:
+        return None
+    ts = parse_ts(payload.get("timestamp_utc"))
+    stale = False
+    if ts is not None and loop_started_at is not None:
+        drift = _seconds_between(ts, loop_started_at)
+        stale = bool(drift is not None and drift > MAX_LEGACY_STALE_SECONDS)
+    stale = stale or payload.get("context_id") not in (None, "", context_id) or int(payload.get("loop_id") or loop_id) != loop_id
+    if not stale:
+        return None
     return {
-        "context_id":     context_id,
-        "pipeline_start": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "input_snapshot": {
-            name: {
-                "timestamp": item.get("timestamp"),
-                "age_s":     item.get("age_s"),
-                "freshness": item.get("freshness"),
-            }
-            for name, item in check["inputs"].items()
-            if item.get("exists")
-        },
+        "path": str(path),
+        "context_id": payload.get("context_id"),
+        "loop_id": payload.get("loop_id"),
+        "timestamp_utc": payload.get("timestamp_utc"),
+        "status": "LEGACY_STALE",
     }
 
 
-def run_context_sync() -> dict[str, Any]:
-    """Ana fonksiyon. Pipeline basinda cagrilir."""
-    now        = _now_dt()
-    context_id = _generate_context_id(now)
-    check      = _check_all_inputs(now)
-    sync_status = _determine_sync_status(check)
-    oldest     = _find_oldest_critical(check)
-    lineage    = _build_lineage_anchor(context_id, check, now)
+def run_context_sync(symbol: str = "BTCUSDT", mode: str = "post") -> dict[str, Any]:
+    context = current_runtime_context(symbol)
+    if mode == "start":
+        context = initialize_runtime_context(symbol)
+    context_id = str(context.get("context_id") or "CTX_UNKNOWN")
+    loop_id = int(context.get("loop_id") or 0)
+    loop_started_at = parse_ts(context.get("loop_started_at_utc") or context.get("timestamp_utc"))
 
-    # Reason codes
-    reason_codes = [
-        f"CONTEXT_ID_{context_id}",
-        f"SYNC_STATUS_{sync_status}",
-        f"SYMBOL_BTCUSDT",
-        "SAFE_TO_OPEN_REAL_TRADE_FALSE",
-        "NO_PRIVATE_API",
-    ]
-    if check["stale_critical"]:
-        reason_codes.append(f"STALE_CRITICAL_{','.join(check['stale_critical'])}")
-    if check["missing_critical"]:
-        reason_codes.append(f"MISSING_CRITICAL_{','.join(check['missing_critical'])}")
-    if check["stale_non_critical"]:
-        reason_codes.append(f"STALE_NON_CRITICAL_{len(check['stale_non_critical'])}_BLOCKS")
+    critical_missing: list[str] = []
+    critical_stale: list[str] = []
+    context_mismatches: list[str] = []
+    timestamp_drift: list[str] = []
+    legacy_stale: list[dict[str, Any]] = []
+    degraded_reasons: list[str] = []
+    active_chain_status: dict[str, dict[str, Any]] = {}
 
-    result = {
-        "timestamp_utc":   _utc_now(),
-        "block_id":        "S0_CONTEXT_SYNC",
-        "context_id":      context_id,
-        "symbol":          "BTCUSDT",
+    for block_id, path in ACTIVE_CHAIN_FILES.items():
+        item = _inspect_file(block_id, path, context_id, loop_id, loop_started_at, block_id in CRITICAL_ACTIVE_BLOCKS)
+        active_chain_status[block_id] = item
+        reasons = set(item.get("reasons") or [])
+        if item["status"] == "MISSING":
+            if item["critical"]:
+                critical_missing.append(block_id)
+            else:
+                degraded_reasons.append(f"{block_id}:missing")
+            continue
+        if item["corrupted"]:
+            if item["critical"]:
+                critical_stale.append(block_id)
+            else:
+                degraded_reasons.append(f"{block_id}:corrupted")
+        if "TIMESTAMP_DRIFT" in ",".join(reasons):
+            timestamp_drift.append(block_id)
+            if item["critical"]:
+                critical_stale.append(block_id)
+            else:
+                degraded_reasons.append(f"{block_id}:stale")
+        if "CONTEXT_ID_MISMATCH" in reasons or "LOOP_ID_MISMATCH" in reasons:
+            context_mismatches.append(block_id)
+            if item["critical"]:
+                critical_stale.append(block_id)
+            else:
+                degraded_reasons.append(f"{block_id}:mismatch")
+        if "CONTEXT_ID_MISSING" in reasons:
+            if item["critical"]:
+                critical_stale.append(block_id)
+            else:
+                degraded_reasons.append(f"{block_id}:context_missing")
 
-        "sync_status":     sync_status,
-        "pipeline_ready":  sync_status in ("SYNC_OK", "SYNC_DEGRADED"),
+    for _, path in LEGACY_BRIDGE_FILES.items():
+        stale_item = _inspect_legacy_file(path, context_id, loop_id, loop_started_at)
+        if stale_item:
+            legacy_stale.append(stale_item)
 
-        "input_check":     check,
-        "oldest_critical": oldest,
-        "lineage_anchor":  lineage,
+    critical_missing = sorted(set(critical_missing))
+    critical_stale = sorted(set(critical_stale))
+    context_mismatches = sorted(set(context_mismatches))
+    timestamp_drift = sorted(set(timestamp_drift))
+    degraded_reasons = sorted(set(degraded_reasons))
 
-        "summary": {
-            "total_inputs":          len(INPUT_FILES),
-            "fresh_count":           sum(1 for v in check["inputs"].values()
-                                        if v.get("freshness") == "FRESH"),
-            "recent_count":          sum(1 for v in check["inputs"].values()
-                                        if v.get("freshness") == "RECENT"),
-            "stale_count":           sum(1 for v in check["inputs"].values()
-                                        if v.get("freshness") == "STALE"),
-            "very_stale_count":      sum(1 for v in check["inputs"].values()
-                                        if v.get("freshness") == "VERY_STALE"),
-            "missing_count":         sum(1 for v in check["inputs"].values()
-                                        if not v.get("exists")),
-            "stale_critical_count":  len(check["stale_critical"]),
-            "missing_critical_count": len(check["missing_critical"]),
+    active_chain_ok = not critical_missing and not critical_stale
+    if active_chain_ok and degraded_reasons:
+        sync_status = "SYNC_DEGRADED"
+    elif active_chain_ok:
+        sync_status = "SYNC_OK"
+    else:
+        sync_status = "SYNC_BROKEN"
+
+    failed_reason = None
+    if sync_status == "SYNC_BROKEN":
+        failed_reason = ";".join(
+            [f"missing={','.join(critical_missing)}" if critical_missing else "", f"stale={','.join(critical_stale)}" if critical_stale else ""]
+        ).strip(";") or "ACTIVE_CHAIN_ALIGNMENT_FAILED"
+
+    payload = stamp_payload(
+        {
+            "sync_status": sync_status,
+            "active_chain_ok": active_chain_ok,
+            "critical_missing": critical_missing,
+            "critical_stale": critical_stale,
+            "context_mismatches": context_mismatches,
+            "timestamp_drift": timestamp_drift,
+            "legacy_stale": legacy_stale,
+            "legacy_bridge_status": {
+                "mode": "LEGACY_BRIDGE",
+                "present": any(load_json(path) for path in LEGACY_BRIDGE_FILES.values()),
+                "files": {block_id: str(path) for block_id, path in LEGACY_BRIDGE_FILES.items()},
+            },
+            "failed_reason": failed_reason,
+            "active_chain_blocks": active_chain_declaration(),
+            "active_chain_status": active_chain_status,
+            "loop_started_at_utc": context.get("loop_started_at_utc"),
+            "pipeline_ready": active_chain_ok,
+            "source": {"source_mode": "S0_CONTEXT_SYNC_POST_VALIDATION" if mode != "start" else "CONTEXT_SYNC_START"},
+            "reason_codes": [
+                f"SYNC_STATUS_{sync_status}",
+                f"ACTIVE_CHAIN_OK_{str(active_chain_ok).upper()}",
+                f"CRITICAL_MISSING_{len(critical_missing)}",
+                f"CRITICAL_STALE_{len(critical_stale)}",
+                f"LEGACY_STALE_{len(legacy_stale)}",
+            ],
+            "data_quality": {
+                "level": "HIGH" if sync_status == "SYNC_OK" else "MEDIUM" if sync_status == "SYNC_DEGRADED" else "LOW",
+                "score": 1.0 if sync_status == "SYNC_OK" else 0.65 if sync_status == "SYNC_DEGRADED" else 0.15,
+                "issues": critical_missing + critical_stale + degraded_reasons,
+            },
+            "feeds_next": {"next_blocks": ["MODEL_FEEDBACK_DIAGNOSTIC", "MODEL_PROMOTION_ENGINE", "LIVE_ELIGIBILITY_GATE"]},
+            "execution_safety": {
+                "safe_to_open_real_trade": False,
+                "private_api_used": False,
+                "live_order_sent": False,
+            },
         },
+        "S0_CONTEXT_SYNC_POST_VALIDATION" if mode != "start" else "CONTEXT_SYNC_START",
+        symbol,
+        context,
+    )
 
-        "reason_codes": reason_codes,
-        "data_quality": {
-            "level": "HIGH"   if sync_status == "SYNC_OK"       else
-                     "MEDIUM" if sync_status == "SYNC_DEGRADED"  else "LOW",
-            "score": 1.0      if sync_status == "SYNC_OK"       else
-                     0.6      if sync_status == "SYNC_DEGRADED"  else 0.2,
-            "issues": (check["stale_critical"] + check["missing_critical"]),
+    write_json(OUTPUT_PATH, payload)
+    write_json(
+        S0_STATE_PATH,
+        {
+            "timestamp_utc": utc_now(),
+            "block_id": "S0_CONTEXT_SYNC_STATE",
+            "symbol": payload.get("symbol"),
+            "context_id": context_id,
+            "loop_id": loop_id,
+            "sync_status": sync_status,
+            "active_chain_ok": active_chain_ok,
+            "failed_reason": failed_reason,
         },
-        "feeds_next": {
-            "next_blocks": ["S1_MARKET_TRUTH", "S2_EVIDENCE", "S3_CANDLE_DNA"],
-            "note": "context_id must be passed to all downstream blocks",
-        },
-        "execution_safety": {
-            "safe_to_open_real_trade": False,
-            "private_api_used":        False,
-            "live_order_sent":         False,
-        },
-    }
-
-    # Dosyalara yaz
-    _write(OUTPUT_PATH, result)
-    _write(S0_STATE_PATH, {
-        "timestamp_utc":  _utc_now(),
-        "context_id":     context_id,
-        "sync_status":    sync_status,
-        "pipeline_ready": result["pipeline_ready"],
-        "oldest_critical_age_s": oldest.get("age_s"),
-    })
-
-    return result
-
-
-def _write(path: Path, data: dict) -> None:
-    import os, tempfile
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    )
+    return payload
 
 
 def get_current_context_id() -> str | None:
-    """
-    Diger bloklar bu fonksiyonu cagirarak
-    mevcut context_id'yi alabilir.
-    """
-    data = _load_json(OUTPUT_PATH)
-    if data:
-        return data.get("context_id")
-    return None
+    return (load_json(OUTPUT_PATH) or load_json(RUNTIME_CONTEXT_PATH) or {}).get("context_id")
 
 
 def is_pipeline_ready() -> bool:
-    """Pipeline calismaya hazir mi?"""
-    data = _load_json(OUTPUT_PATH)
-    if data:
-        return bool(data.get("pipeline_ready", False))
-    return False
+    return bool((load_json(OUTPUT_PATH) or {}).get("pipeline_ready"))
 
 
 def main() -> None:
-    result = run_context_sync()
-
-    # Konsol ozeti
-    s = result["summary"]
-    print(f"\n{'='*55}")
-    print(f"  CONTEXT SYNC — {result['context_id']}")
-    print(f"{'='*55}")
-    print(f"  Sync Status  : {result['sync_status']}")
-    print(f"  Ready        : {result['pipeline_ready']}")
-    print(f"  Fresh        : {s['fresh_count']} / Recent: {s['recent_count']}")
-    print(f"  Stale        : {s['stale_count']} / Very Stale: {s['very_stale_count']}")
-    print(f"  Missing      : {s['missing_count']}")
-    if result['input_check']['stale_critical']:
-        print(f"  ⚠ Stale crit : {result['input_check']['stale_critical']}")
-    if result['input_check']['missing_critical']:
-        print(f"  ✗ Missing    : {result['input_check']['missing_critical']}")
-    print(f"{'='*55}\n")
+    print(json.dumps(run_context_sync(), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

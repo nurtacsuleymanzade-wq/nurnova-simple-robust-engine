@@ -1,10 +1,3 @@
-"""S11.1 Local Full Pipeline Runner — NOVA SIMPLE ROBUST ENGINE v1.
-
-DUZELTME v2: S1-S22 arasi tum bloklar dahil edildi.
-S1 gercek flow_state'den okur. S13-S22 kendi state dosyalarindan okur.
-No live trading. No private API. safe_to_open_real_trade always false.
-"""
-
 from __future__ import annotations
 
 import contextlib
@@ -16,6 +9,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from src.simple.research_runtime import initialize_runtime_context, stamp_payload, write_json
+
 BLOCK_ID = "S11_1_LOCAL_PIPELINE_RUNNER"
 FEEDS_NEXT: dict[str, list[str]] = {"next_blocks": []}
 
@@ -23,67 +18,65 @@ _REQUIRED_CONTRACT_FIELDS = frozenset(
     {"timestamp_utc", "block_id", "symbol", "source", "data_quality", "reason_codes", "feeds_next"}
 )
 
-# (modul, fonksiyon_veya_LIVE, fallback_label)
-# "LIVE" = S1 icin gercek flow_state'den okur
-# "NOARG" = fonksiyon arguman almaz, direkt cagrilir
-# "run_fake_sample" = eski davranis, symbol argumaniyla cagrilir
-_STAGES: list[tuple[str, str, str]] = [
-    # --- Veri katmani ---
-    ("src.simple.run_s1_market_truth",            "LIVE",            "S1_OFFICIAL_MARKET_TRUTH"),
-    ("src.simple.run_s2_1s_evidence",            "LIVE_S2",         "S2_LIGHTWEIGHT_1S_EVIDENCE"),
-    ("src.simple.run_s3_hybrid_candle_dna",       "LIVE_S3",         "S3_HYBRID_CANDLE_DNA"),
-    ("src.simple.quality_weight_engine",          "LIVE_S4",         "S4_QUALITY_WEIGHT_ENGINE"),
-    ("src.simple.liquidity_structure_engine",     "LIVE_S5",         "S5_LIQUIDITY_STRUCTURE_CONTEXT"),
-    # --- Setup katmani ---
-    ("src.simple.setup_candidate_engine",         "LIVE_S6",         "S6_SCENARIO_SETUP_CANDIDATE"),
-    # --- Depth katmani (S27-S27B) ---
+_ACTIVE_CHAIN_STAGES: list[tuple[str, str, str]] = [
+    ("src.simple.run_s1_market_truth", "LIVE", "S1_OFFICIAL_MARKET_TRUTH"),
+    ("src.simple.run_s2_1s_evidence", "LIVE_S2", "S2_LIGHTWEIGHT_1S_EVIDENCE"),
+    ("src.simple.run_s3_hybrid_candle_dna", "LIVE_S3", "S3_HYBRID_CANDLE_DNA"),
+    ("src.simple.quality_weight_engine", "LIVE_S4", "S4_QUALITY_WEIGHT_ENGINE"),
+    ("src.simple.liquidity_structure_engine", "LIVE_S5", "S5_LIQUIDITY_STRUCTURE_CONTEXT"),
+    ("src.simple.setup_candidate_engine", "LIVE_S6", "S6_SCENARIO_SETUP_CANDIDATE"),
     ("src.simple.run_s27_depth_liquidity_memory", "NOARG_MAIN", "S27_DEPTH_LIQUIDITY_MEMORY"),
-    ("src.simple.run_s27b_wall_lifecycle",        "NOARG_MAIN", "S27B_WALL_LIFECYCLE"),
-    # --- Flow katmani (S13-S15) ---
-    ("src.simple.flow_evidence_engine",           "NOARG",           "S13_FLOW_EVIDENCE"),
-    ("src.simple.flow_persistence_engine",        "NOARG",           "S14_FLOW_PERSISTENCE"),
-    ("src.simple.observation_factory",            "NOARG",           "OBSERVATION_FACTORY"),
-    ("src.simple.mtf_candle_dna_factory",         "NOARG",           "MTF_CANDLE_DNA_FACTORY"),
-    ("src.simple.atr_engine",                     "NOARG",           "ATR_ENGINE"),
-    ("src.simple.market_structure_engine",        "NOARG",           "MARKET_STRUCTURE_ENGINE"),
-    ("src.simple.liquidity_map_engine",           "NOARG",           "LIQUIDITY_MAP_ENGINE"),
-    ("src.simple.interpretation_engine",          "NOARG",           "INTERPRETATION_ENGINE"),
-    ("src.simple.three_scenario_engine",          "NOARG",           "THREE_SCENARIO_ENGINE"),
-    ("src.simple.business_zone_engine",           "NOARG",           "BUSINESS_ZONE_ENGINE"),
-    ("src.simple.market_regime_classifier",       "NOARG",           "MARKET_REGIME_CLASSIFIER"),
-    ("src.simple.intent_engine",                  "NOARG",           "INTENT_ENGINE"),
-    ("src.simple.positioning_context_engine",     "NOARG",           "POSITIONING_CONTEXT_ENGINE"),
-    ("src.simple.momentum_continuation_engine",   "NOARG",           "MOMENTUM_CONTINUATION_ENGINE"),
-    ("src.simple.double_distribution_reversal_engine", "NOARG",      "DOUBLE_DISTRIBUTION_REVERSAL_ENGINE"),
-    ("src.simple.trap_trader_engine",             "NOARG",           "TRAP_TRADER_ENGINE"),
-    ("src.simple.unified_context_engine",         "NOARG",           "UNIFIED_CONTEXT_ENGINE"),
-    ("src.simple.model_definition_registry",      "NOARG",           "MODEL_DEFINITION_REGISTRY"),
-    ("src.simple.model_hunter_engine",            "NOARG",           "MODEL_HUNTER_ENGINE"),
-    ("src.simple.model_semantic_validator",       "NOARG",           "MODEL_SEMANTIC_VALIDATOR"),
-    ("src.simple.model_cluster_engine",           "NOARG",           "MODEL_CLUSTER_ENGINE"),
-    ("src.simple.model_cooldown_engine",          "NOARG",           "MODEL_COOLDOWN_ENGINE"),
-    ("src.simple.setup_family_activation_engine", "NOARG",           "SETUP_FAMILY_ACTIVATION_ENGINE"),
-    ("src.simple.paper_trade_factory",            "NOARG",           "PAPER_TRADE_FACTORY"),
-    ("src.simple.research_paper_lifecycle_engine","NOARG",           "RESEARCH_PAPER_LIFECYCLE_ENGINE"),
-    ("src.simple.research_edge_matrix_engine",    "NOARG",           "RESEARCH_EDGE_MATRIX_ENGINE"),
-    ("src.simple.flow_to_setup_context_engine",   "NOARG",           "S15_FLOW_TO_SETUP_CONTEXT"),
-    # --- Model layer (after S15, before S16) ---
-    ("src.simple.absorption_reversal_engine",     "NOARG",           "AR01_ABSORPTION_REVERSAL"),
-    ("src.simple.delta_absorption_failure_engine","NOARG",           "DAF_DELTA_ABSORPTION_FAILURE"),
-    ("src.simple.failed_continuation_reversal_engine", "NOARG",      "FCR_FAILED_CONTINUATION"),
-    ("src.simple.candle_quality_engine",          "NOARG",           "CQE_CANDLE_QUALITY"),
-    ("src.simple.model_registry",                 "NOARG",           "MODEL_REGISTRY"),
-    # --- Senaryo ve karar (S16-S18) ---
-    ("src.simple.scenario_entry_trigger_engine",  "NOARG",           "S16_SCENARIO_ENTRY_TRIGGER"),
-    ("src.simple.trade_plan_engine",              "NOARG",           "S17_TRADE_PLAN"),
-    ("src.simple.decision_gate_engine",           "NOARG",           "S18_DECISION_GATE"),
-    # --- Paper ve ogrenme (S20-S22) ---
-    ("src.simple.paper_lifecycle_tracker",        "NOARG", "S20_PAPER_LIFECYCLE"),
-    ("src.simple.outcome_monitor",                "NOARG", "S21_OUTCOME_MONITOR"),
-    ("src.simple.edge_matrix_v2",                 "NOARG", "S22_EDGE_MATRIX"),
-    # --- Raporlama ---
-    ("src.simple.simple_brain_report_engine",     "run_fake_sample", "S10_SIMPLE_BRAIN_REPORT"),
+    ("src.simple.run_s27b_wall_lifecycle", "NOARG_MAIN", "S27B_WALL_LIFECYCLE"),
+    ("src.simple.flow_evidence_engine", "NOARG", "S13_FLOW_EVIDENCE"),
+    ("src.simple.flow_persistence_engine", "NOARG", "S14_FLOW_PERSISTENCE"),
+    ("src.simple.observation_factory", "NOARG", "OBSERVATION_FACTORY"),
+    ("src.simple.mtf_candle_dna_factory", "NOARG", "MTF_CANDLE_DNA_FACTORY"),
+    ("src.simple.atr_engine", "NOARG", "ATR_ENGINE"),
+    ("src.simple.market_structure_engine", "NOARG", "MARKET_STRUCTURE_ENGINE"),
+    ("src.simple.liquidity_map_engine", "NOARG", "LIQUIDITY_MAP_ENGINE"),
+    ("src.simple.interpretation_engine", "NOARG", "INTERPRETATION_ENGINE"),
+    ("src.simple.three_scenario_engine", "NOARG", "THREE_SCENARIO_ENGINE"),
+    ("src.simple.business_zone_engine", "NOARG", "BUSINESS_ZONE_ENGINE"),
+    ("src.simple.market_regime_classifier", "NOARG", "MARKET_REGIME_CLASSIFIER"),
+    ("src.simple.intent_engine", "NOARG", "INTENT_ENGINE"),
+    ("src.simple.positioning_context_engine", "NOARG", "POSITIONING_CONTEXT_ENGINE"),
+    ("src.simple.momentum_continuation_engine", "NOARG", "MOMENTUM_CONTINUATION_ENGINE"),
+    ("src.simple.double_distribution_reversal_engine", "NOARG", "DOUBLE_DISTRIBUTION_REVERSAL_ENGINE"),
+    ("src.simple.trap_trader_engine", "NOARG", "TRAP_TRADER_ENGINE"),
+    ("src.simple.unified_context_engine", "NOARG", "UNIFIED_CONTEXT_ENGINE"),
+    ("src.simple.model_definition_registry", "NOARG", "MODEL_DEFINITION_REGISTRY"),
+    ("src.simple.model_hunter_engine", "NOARG", "MODEL_HUNTER_ENGINE"),
+    ("src.simple.model_semantic_validator", "NOARG", "MODEL_SEMANTIC_VALIDATOR"),
+    ("src.simple.model_cluster_engine", "NOARG", "MODEL_CLUSTER_ENGINE"),
+    ("src.simple.model_cooldown_engine", "NOARG", "MODEL_COOLDOWN_ENGINE"),
+    ("src.simple.setup_family_activation_engine", "NOARG", "SETUP_FAMILY_ACTIVATION_ENGINE"),
+    ("src.simple.paper_trade_factory", "NOARG", "PAPER_TRADE_FACTORY"),
+    ("src.simple.research_paper_lifecycle_engine", "NOARG", "RESEARCH_PAPER_LIFECYCLE_ENGINE"),
+    ("src.simple.research_edge_matrix_engine", "NOARG", "RESEARCH_EDGE_MATRIX_ENGINE"),
+    ("src.simple.model_feedback_diagnostic", "NOARG", "MODEL_FEEDBACK_DIAGNOSTIC"),
+    ("src.simple.model_promotion_engine", "NOARG", "MODEL_PROMOTION_ENGINE"),
+    ("src.simple.live_eligibility_gate", "NOARG", "LIVE_ELIGIBILITY_GATE_DIAGNOSTIC"),
+    ("src.simple.system_auditor_engine", "NOARG", "SYSTEM_AUDITOR_ENGINE"),
+    ("src.simple.system_query_state_builder", "NOARG", "SYSTEM_QUERY_STATE_BUILDER"),
 ]
+
+_LEGACY_BRIDGE_STAGES: list[tuple[str, str, str]] = [
+    ("src.simple.flow_to_setup_context_engine", "NOARG", "S15_FLOW_TO_SETUP_CONTEXT"),
+    ("src.simple.absorption_reversal_engine", "NOARG", "AR01_ABSORPTION_REVERSAL"),
+    ("src.simple.delta_absorption_failure_engine", "NOARG", "DAF_DELTA_ABSORPTION_FAILURE"),
+    ("src.simple.failed_continuation_reversal_engine", "NOARG", "FCR_FAILED_CONTINUATION"),
+    ("src.simple.candle_quality_engine", "NOARG", "CQE_CANDLE_QUALITY"),
+    ("src.simple.model_registry", "NOARG", "MODEL_REGISTRY"),
+    ("src.simple.scenario_entry_trigger_engine", "NOARG", "S16_SCENARIO_ENTRY_TRIGGER"),
+    ("src.simple.trade_plan_engine", "NOARG", "S17_TRADE_PLAN"),
+    ("src.simple.decision_gate_engine", "NOARG", "S18_DECISION_GATE"),
+    ("src.simple.paper_lifecycle_tracker", "NOARG", "S20_PAPER_LIFECYCLE"),
+    ("src.simple.outcome_monitor", "NOARG", "S21_OUTCOME_MONITOR"),
+    ("src.simple.edge_matrix_v2", "NOARG", "S22_EDGE_MATRIX"),
+    ("src.simple.simple_brain_report_engine", "run_fake_sample", "S10_SIMPLE_BRAIN_REPORT"),
+]
+
+_STAGES = [*_ACTIVE_CHAIN_STAGES, *_LEGACY_BRIDGE_STAGES]
 
 
 def _utc_now() -> str:
@@ -107,13 +100,13 @@ def _classify_status(output: dict[str, Any]) -> str:
 
 
 def _run_live_s1(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
-    """S1'i gercek flow_state'den calistir."""
     t0 = time.monotonic()
     try:
         old_argv = sys.argv
         sys.argv = ["run_s1_market_truth", "--symbol", symbol]
         try:
             from src.simple.run_s1_market_truth import main as s1_main
+
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 s1_main()
@@ -128,15 +121,10 @@ def _run_live_s1(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]
 def _run_stage(module_path: str, func_name: str, symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
     if func_name == "LIVE":
         return _run_live_s1(symbol)
-
     t0 = time.monotonic()
     try:
         mod = importlib.import_module(module_path)
         fn = getattr(mod, func_name)
-        if func_name == "NOARG":
-            # Fonksiyon adi NOARG ise modul icerisindeki ilk run_ fonksiyonu cagrilir
-            # Ama biz string olarak sakladik, asil cagri asagida
-            raise ValueError("NOARG should be resolved before calling")
         result: dict[str, Any] = fn(symbol)
         return result, round((time.monotonic() - t0) * 1000, 1), None
     except Exception as exc:
@@ -144,7 +132,6 @@ def _run_stage(module_path: str, func_name: str, symbol: str) -> tuple[dict[str,
 
 
 def _run_noarg_main_stage(module_path: str) -> tuple[dict[str, Any] | None, float, str | None]:
-    """module.main() cagrilir, stdout JSON parse edilir."""
     t0 = time.monotonic()
     try:
         mod = importlib.import_module(module_path)
@@ -159,11 +146,9 @@ def _run_noarg_main_stage(module_path: str) -> tuple[dict[str, Any] | None, floa
 
 
 def _run_noarg_stage(module_path: str) -> tuple[dict[str, Any] | None, float, str | None]:
-    """Argumansiz engine fonksiyonlarini calistir."""
     t0 = time.monotonic()
     try:
         mod = importlib.import_module(module_path)
-        # Once module imports helper run_ functions from elsewhere, prefer the local engine runner.
         run_candidates = []
         imported_candidates = []
         for name in dir(mod):
@@ -191,53 +176,39 @@ def _run_noarg_stage(module_path: str) -> tuple[dict[str, Any] | None, float, st
         return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
 
 
+def _persist_stage_output(module_path: str, output: dict[str, Any], symbol: str, context: dict[str, Any]) -> dict[str, Any]:
+    stamped = stamp_payload(output, str(output.get("block_id") or module_path.rsplit(".", 1)[-1].upper()), symbol, context)
+    try:
+        mod = importlib.import_module(module_path)
+        output_path = getattr(mod, "OUTPUT_PATH", None)
+        if output_path is not None:
+            write_json(output_path, stamped)
+    except Exception:
+        pass
+    return stamped
+
+
 def run_pipeline(symbol: str, source_mode: str = "LIVE") -> dict[str, Any]:
-    """Execute S0 context sync + S1-S22 sequentially."""
     block_results: list[dict[str, Any]] = []
     blocks_passed = 0
     blocks_failed = 0
     pipeline_status = "COMPLETE"
     stop_reason: str | None = None
-    context_id = "CTX_UNKNOWN"
+    context = initialize_runtime_context(symbol)
+    context_id = context.get("context_id", "CTX_UNKNOWN")
     sync_status = "UNKNOWN"
 
-    # S0: Context Sync - pipeline basinda her zaman calistir
-    try:
-        from src.simple.context_sync_engine import run_context_sync
-        t0_sync = time.monotonic()
-        sync_result = run_context_sync()
-        sync_ms = round((time.monotonic() - t0_sync) * 1000, 1)
-        context_id = sync_result.get("context_id", "CTX_UNKNOWN")
-        sync_status = sync_result.get("sync_status", "UNKNOWN")
-        block_results.append({
-            "block_id":    "S0_CONTEXT_SYNC",
-            "status":      "PASSED" if sync_result.get("pipeline_ready") else "DEGRADED",
-            "runtime_ms":  sync_ms,
-            "context_id":  context_id,
-            "sync_status": sync_status,
-            "error":       None,
-        })
-        if sync_result.get("pipeline_ready"):
-            blocks_passed += 1
-        else:
-            blocks_failed += 1
-        # SYNC_BROKEN pipeline'i durdurmaz — sadece reason_code ekler
-        # Pipeline calisinca dosyalar guncellenir, sonraki sync OK olur
-        if sync_status == "SYNC_BROKEN":
-            pass  # devam et, warn zaten block_results'ta var
-    except Exception as exc:
-        block_results.append({
-            "block_id":    "S0_CONTEXT_SYNC",
-            "status":      "DEGRADED",
-            "runtime_ms":  0.0,
-            "context_id":  context_id,
-            "sync_status": "ERROR",
-            "error":       str(exc)[:200],
-        })
-        blocks_failed += 1
+    block_results.append({
+        "block_id": "RUNTIME_CONTEXT",
+        "status": "PASSED",
+        "runtime_ms": 0.0,
+        "context_id": context_id,
+        "sync_status": "STARTED",
+        "error": None,
+    })
+    blocks_passed += 1
 
     for module_path, func_name, fallback_label in _STAGES:
-        # Dogru cagri yontemini sec
         if func_name == "LIVE":
             output, runtime_ms, exc_str = _run_live_s1(symbol)
         elif func_name == "LIVE_S2":
@@ -255,17 +226,7 @@ def run_pipeline(symbol: str, source_mode: str = "LIVE") -> dict[str, Any]:
         elif func_name == "NOARG":
             output, runtime_ms, exc_str = _run_noarg_stage(module_path)
         else:
-            t0 = time.monotonic()
-            try:
-                mod = importlib.import_module(module_path)
-                fn = getattr(mod, func_name)
-                output = fn(symbol)
-                runtime_ms = round((time.monotonic() - t0) * 1000, 1)
-                exc_str = None
-            except Exception as exc:
-                output = None
-                runtime_ms = round((time.monotonic() - t0) * 1000, 1)
-                exc_str = str(exc)
+            output, runtime_ms, exc_str = _run_stage(module_path, func_name, symbol)
 
         if exc_str is not None:
             block_results.append({
@@ -275,9 +236,7 @@ def run_pipeline(symbol: str, source_mode: str = "LIVE") -> dict[str, Any]:
                 "error": exc_str[:200],
             })
             blocks_failed += 1
-            # Kritik olmayan bloklar icin devam et (S20-S22 vb)
-            critical_blocks = {"S1_", "S2_", "S3_", "S4_", "S5_", "S6_"}
-            if any(fallback_label.startswith(cb) for cb in critical_blocks):
+            if any(fallback_label.startswith(cb) for cb in {"S1_", "S2_", "S3_", "S4_", "S5_", "S6_"}):
                 pipeline_status = "STOPPED_CRITICAL"
                 stop_reason = f"EXCEPTION_IN_{fallback_label}"
                 break
@@ -293,6 +252,7 @@ def run_pipeline(symbol: str, source_mode: str = "LIVE") -> dict[str, Any]:
             blocks_failed += 1
             continue
 
+        output = _persist_stage_output(module_path, output, symbol, context)
         violation = _check_critical(output)
         if violation:
             block_results.append({
@@ -304,17 +264,48 @@ def run_pipeline(symbol: str, source_mode: str = "LIVE") -> dict[str, Any]:
             blocks_failed += 1
             continue
 
-        status = _classify_status(output)
         block_results.append({
             "block_id": output.get("block_id", fallback_label),
-            "status": status,
+            "status": _classify_status(output),
             "runtime_ms": runtime_ms,
             "error": None,
         })
         blocks_passed += 1
 
+    try:
+        from src.simple.context_sync_engine import run_context_sync
+
+        t0_sync = time.monotonic()
+        sync_result = run_context_sync(symbol=symbol, mode="post")
+        sync_ms = round((time.monotonic() - t0_sync) * 1000, 1)
+        sync_status = sync_result.get("sync_status", "UNKNOWN")
+        sync_block_status = "PASSED" if sync_status == "SYNC_OK" else "DEGRADED" if sync_status == "SYNC_DEGRADED" else "CRITICAL"
+        block_results.append({
+            "block_id": "S0_CONTEXT_SYNC_POST_VALIDATION",
+            "status": sync_block_status,
+            "runtime_ms": sync_ms,
+            "context_id": context_id,
+            "sync_status": sync_status,
+            "error": sync_result.get("failed_reason"),
+        })
+        if sync_block_status == "PASSED":
+            blocks_passed += 1
+        else:
+            blocks_failed += 1
+    except Exception as exc:
+        sync_status = "ERROR"
+        block_results.append({
+            "block_id": "S0_CONTEXT_SYNC_POST_VALIDATION",
+            "status": "CRITICAL",
+            "runtime_ms": 0.0,
+            "context_id": context_id,
+            "sync_status": sync_status,
+            "error": str(exc)[:200],
+        })
+        blocks_failed += 1
+
     reason_codes = [
-        "SOURCE_FLOW_STATE_LIVE",
+        f"SOURCE_{source_mode}",
         f"SYMBOL_{symbol}",
         f"PIPELINE_{pipeline_status}",
         f"SYNC_{sync_status}",
@@ -339,11 +330,12 @@ def run_pipeline(symbol: str, source_mode: str = "LIVE") -> dict[str, Any]:
         "timestamp_utc": _utc_now(),
         "block_id": BLOCK_ID,
         "symbol": symbol,
-        "source": {"source_mode": "FLOW_STATE_LIVE"},
+        "source": {"source_mode": source_mode},
         "context_id": context_id,
+        "loop_id": context.get("loop_id"),
         "sync_status": sync_status,
         "execution_summary": {
-            "blocks_total": len(_STAGES),
+            "blocks_total": len(_STAGES) + 2,
             "blocks_passed": blocks_passed,
             "blocks_failed": blocks_failed,
             "pipeline_status": pipeline_status,
@@ -361,18 +353,14 @@ def run_pipeline(symbol: str, source_mode: str = "LIVE") -> dict[str, Any]:
     }
 
 
-# ============================================================
-# LIVE HANDLER'LAR — S2-S6 icin gercek veri okuma
-# ============================================================
-
 def _run_live_s2(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
-    """S2'yi gercek flow_state'den calistir."""
     t0 = time.monotonic()
     try:
         old_argv = sys.argv
         sys.argv = ["run_s2_1s_evidence", "--symbol", symbol]
         try:
             from src.simple.run_s2_1s_evidence import main as s2_main
+
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 s2_main()
@@ -385,13 +373,13 @@ def _run_live_s2(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]
 
 
 def _run_live_s3(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
-    """S3'u S1+S2 state dosyalarindan calistir."""
     t0 = time.monotonic()
     try:
         old_argv = sys.argv
         sys.argv = ["run_s3_hybrid_candle_dna", "--symbol", symbol]
         try:
             from src.simple.run_s3_hybrid_candle_dna import main as s3_main
+
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 s3_main()
@@ -403,102 +391,35 @@ def _run_live_s3(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]
         return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
 
 
-def _run_live_s4(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
-    """S4'u state dosyalarindan calistir."""
-    t0 = time.monotonic()
-    try:
-        old_argv = sys.argv
-        sys.argv = ["run_s4_quality_weight", "--symbol", symbol]
-        try:
-            from src.simple.run_s4_quality_weight import main as s4_main
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                s4_main()
-            output = json.loads(buf.getvalue())
-        finally:
-            sys.argv = old_argv
-        return output, round((time.monotonic() - t0) * 1000, 1), None
-    except Exception as exc:
-        return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
-
-
-def _run_live_s5(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
-    """S5'i state dosyalarindan calistir."""
-    t0 = time.monotonic()
-    try:
-        old_argv = sys.argv
-        sys.argv = ["run_s5_liquidity_structure", "--symbol", symbol]
-        try:
-            from src.simple.run_s5_liquidity_structure import main as s5_main
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                s5_main()
-            output = json.loads(buf.getvalue())
-        finally:
-            sys.argv = old_argv
-        return output, round((time.monotonic() - t0) * 1000, 1), None
-    except Exception as exc:
-        return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
-
-
-def _run_live_s6(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
-    """S6'yi state dosyalarindan calistir."""
-    t0 = time.monotonic()
-    try:
-        old_argv = sys.argv
-        sys.argv = ["run_s6_setup_candidate", "--symbol", symbol]
-        try:
-            from src.simple.run_s6_setup_candidate import main as s6_main
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                s6_main()
-            output = json.loads(buf.getvalue())
-        finally:
-            sys.argv = old_argv
-        return output, round((time.monotonic() - t0) * 1000, 1), None
-    except Exception as exc:
-        return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
-
-
 def _run_live_s4_direct(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
-    """S4'u state dosyalarindan direkt calistir."""
-    import pathlib, json as _json
+    import json as _json
+    import pathlib
+
     t0 = time.monotonic()
     try:
         state_dir = pathlib.Path("state/simple")
-        
-        s1_raw = _json.loads((state_dir / "latest_market_truth.json").read_text())
-        s1 = {
-            "available": True,
-            "data_quality_score": s1_raw.get("data_quality", {}).get("score", 0.5),
-            "consistency_label": s1_raw.get("consistency", {}).get("consistency_label", "UNKNOWN"),
-        }
-    except Exception:
-        s1 = None
-
-    try:
-        state_dir = pathlib.Path("state/simple")
-        s2_raw = _json.loads((state_dir / "latest_1s_evidence.json").read_text())
-        s2 = {
-            "available": True,
-            "data_quality_score": s2_raw.get("data_quality", {}).get("score", 0.5),
-        }
-    except Exception:
-        s2 = None
-
-    try:
-        state_dir = pathlib.Path("state/simple")
-        s3_raw = _json.loads((state_dir / "latest_hybrid_candle_dna.json").read_text())
-        s3 = {
-            "available": True,
-            "hybrid_quality_weight": s3_raw.get("quality", {}).get("hybrid_quality_weight", 0.5),
-        }
-    except Exception:
-        s3 = None
-
-    try:
+        try:
+            s1_raw = _json.loads((state_dir / "latest_market_truth.json").read_text())
+            s1 = {
+                "available": True,
+                "data_quality_score": s1_raw.get("data_quality", {}).get("score", 0.5),
+                "consistency_label": s1_raw.get("consistency", {}).get("consistency_label", "UNKNOWN"),
+            }
+        except Exception:
+            s1 = None
+        try:
+            s2_raw = _json.loads((state_dir / "latest_1s_evidence.json").read_text())
+            s2 = {"available": True, "data_quality_score": s2_raw.get("data_quality", {}).get("score", 0.5)}
+        except Exception:
+            s2 = None
+        try:
+            s3_raw = _json.loads((state_dir / "latest_hybrid_candle_dna.json").read_text())
+            s3 = {"available": True, "hybrid_quality_weight": s3_raw.get("quality", {}).get("hybrid_quality_weight", 0.5)}
+        except Exception:
+            s3 = None
         from src.simple.quality_weight_engine import build_quality_weight
         from src.simple.run_s4_quality_weight import _write_outputs as s4_write
+
         result = build_quality_weight(symbol, s1, s2, s3, "FLOW_STATE_LIVE")
         s4_write(result)
         return result, round((time.monotonic() - t0) * 1000, 1), None
@@ -507,12 +428,11 @@ def _run_live_s4_direct(symbol: str) -> tuple[dict[str, Any] | None, float, str 
 
 
 def _run_live_s5_direct(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
-    """S5'i state dosyalarindan direkt calistir."""
-    import pathlib, json as _json
     t0 = time.monotonic()
     try:
-        from src.simple.run_s5_liquidity_structure import _load_inputs, _write_outputs as s5_write
         from src.simple.liquidity_structure_engine import build_liquidity_structure
+        from src.simple.run_s5_liquidity_structure import _load_inputs, _write_outputs as s5_write
+
         s1, s3, s4 = _load_inputs()
         result = build_liquidity_structure(symbol, s1, s3, s4, "FLOW_STATE_LIVE")
         s5_write(result)
@@ -522,11 +442,11 @@ def _run_live_s5_direct(symbol: str) -> tuple[dict[str, Any] | None, float, str 
 
 
 def _run_live_s6_direct(symbol: str) -> tuple[dict[str, Any] | None, float, str | None]:
-    """S6'yi state dosyalarindan direkt calistir."""
     t0 = time.monotonic()
     try:
         from src.simple.run_s6_setup_candidate import _load_inputs, _write_outputs as s6_write
         from src.simple.setup_candidate_engine import build_setup_candidate
+
         s1, s2, s3, s4, s5 = _load_inputs()
         result = build_setup_candidate(symbol, s1, s2, s3, s4, s5, "FLOW_STATE_LIVE")
         s6_write(result)

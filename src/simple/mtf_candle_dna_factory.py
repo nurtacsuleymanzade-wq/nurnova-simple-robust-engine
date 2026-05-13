@@ -1151,6 +1151,21 @@ def run_mtf_candle_dna_factory() -> dict[str, Any]:
 
     for tf_name, payload in timeframes.items():
         _apply_atr_state(payload, tf_name, atr_state)
+        volatility = payload.get("volatility") or {}
+        candle_category = payload.get("candle_category") or {}
+        payload["atr_14"] = volatility.get("atr_14")
+        payload["atr_21"] = volatility.get("atr_21")
+        payload["quality"] = (payload.get("data_quality") or {}).get("level")
+        payload["reason_codes"] = sorted(
+            set(
+                [
+                    *list((payload.get("data_quality") or {}).get("missing_fields") or []),
+                    *list(candle_category.get("reason_codes") or []),
+                    *list(volatility.get("reason_codes") or []),
+                ]
+            )
+        )
+        payload["candle_category_label"] = candle_category.get("primary", "UNKNOWN")
 
     summary = _build_summary(timeframes)
     data_quality = _overall_data_quality(timeframes)

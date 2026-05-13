@@ -1,0 +1,75 @@
+{
+  "timestamp_utc": "2026-05-13T14:46:59Z",
+  "canonical_runtime": "run_loop.py",
+  "runtime_pid": 6372,
+  "runtime_lock": "C:\\Users\\Nurtac\\projects\\nurnova-workspace\\nurnova-simple-robust-engine\\state\\simple\\runtime_loop.lock",
+  "lock_status": "STOPPED",
+  "loop": 1,
+  "child_processes": [],
+  "child_process_scan_errors": [
+    "CHILD_PROCESS_SCAN_NOT_AVAILABLE_ON_WINDOWS_WITHOUT_CIM"
+  ],
+  "subprocess_usage": [
+    {
+      "file": "run_loop.py",
+      "usage": "subprocess.run([sys.executable, '-m', 'src.simple.run_local_full_pipeline'], capture_output=True, text=True)",
+      "purpose": "one bounded pipeline execution per runtime loop",
+      "daemonized_child": false,
+      "recursive_run_loop": false
+    },
+    {
+      "file": "src/simple/run_loop.py",
+      "usage": "wrapper only; delegates to root run_loop.py",
+      "purpose": "backward-compatible entrypoint",
+      "daemonized_child": false,
+      "recursive_run_loop": false
+    },
+    {
+      "file": "src/simple/local_pipeline_runner.py",
+      "usage": "contextlib.redirect_stdout for stage JSON parsing",
+      "purpose": "capture module main() JSON without spawning child runtimes",
+      "daemonized_child": false,
+      "recursive_run_loop": false
+    },
+    {
+      "file": "src/simple/run_local_full_pipeline.py",
+      "usage": "direct call to local_pipeline_runner.run_pipeline",
+      "purpose": "CLI pipeline entrypoint",
+      "daemonized_child": false,
+      "recursive_run_loop": false
+    }
+  ],
+  "duplicate_loop_detected": false,
+  "duplicate_loop_fixed": false,
+  "duplicate_processes": [],
+  "process_scan_errors": [
+    "WINDOWS_PROCESS_SCAN_FAILED_Get-CimInstance : Access denied \nAt line:1 char:1\n+ Get-CimInstance Win32_Process | Where-Object { ($_.Name -match 'pytho ...\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n  "
+  ],
+  "live_log_status": {
+    "path": "C:\\Users\\Nurtac\\projects\\nurnova-workspace\\nurnova-simple-robust-engine\\live.log",
+    "exists": true,
+    "size_bytes": 25610,
+    "required_terms": [
+      "SEMANTIC",
+      "CLUST",
+      "SETUP_ACT",
+      "PAPER",
+      "EDGE"
+    ],
+    "present_terms": [
+      "SEMANTIC",
+      "CLUST",
+      "SETUP_ACT",
+      "PAPER",
+      "EDGE"
+    ],
+    "missing_terms": [],
+    "nohup_only_output": false,
+    "stdout_isatty": false
+  },
+  "execution_safety": {
+    "safe_to_open_real_trade": false,
+    "private_api_used": false,
+    "live_order_sent": false
+  }
+}

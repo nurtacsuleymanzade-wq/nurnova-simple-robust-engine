@@ -112,7 +112,7 @@ def test_feeds_next_is_dict_with_next_blocks():
 
 def test_blocks_total_matches_stage_count():
     result = run_pipeline("BTCUSDT")
-    assert result["execution_summary"]["blocks_total"] == len(_STAGES)
+    assert result["execution_summary"]["blocks_total"] == len(_STAGES) + 2
 
 
 def test_passed_plus_failed_equals_blocks_run():
@@ -136,7 +136,7 @@ def test_complete_pipeline_stop_reason_is_none():
 def test_complete_pipeline_all_blocks_have_results():
     result = run_pipeline("BTCUSDT")
     if result["execution_summary"]["pipeline_status"] == "COMPLETE":
-        assert len(result["block_results"]) == len(_STAGES)
+        assert len(result["block_results"]) == len(_STAGES) + 2
 
 
 def test_block_statuses_are_valid_values():

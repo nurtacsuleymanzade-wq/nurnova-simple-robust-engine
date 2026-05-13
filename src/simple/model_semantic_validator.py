@@ -12,8 +12,38 @@ STATE_DIR = Path("state/simple")
 DATA_DIR = Path("data/simple")
 
 INPUT_PATH = STATE_DIR / "latest_model_hunter.json"
+CLUSTERS_PATH = STATE_DIR / "latest_model_clusters.json"
 OUTPUT_PATH = STATE_DIR / "latest_model_semantic_validation.json"
 HISTORY_PATH = DATA_DIR / "model_semantic_validation_history.jsonl"
+
+_CONTINUATION_FAMILIES = {
+    "VOLATILITY_EXPANSION_CONTINUATION",
+    "MOMENTUM_CONTINUATION",
+    "ACCEPTANCE_BREAKOUT",
+    "INITIATIVE_BREAKOUT",
+    "MTF_ALIGNMENT",
+}
+
+_TRAP_TOKENS = {
+    "TRAP",
+    "TRAPPED",
+    "FAKE",
+    "STOP_RUN",
+    "SWEEP",
+    "ABSORPTION",
+    "FAILED_BREAKOUT",
+}
+
+_CONTINUATION_TOKENS = {
+    "CONTINUATION",
+    "BREAKOUT",
+    "INITIATIVE",
+    "MOMENTUM",
+    "MTF_ALIGNMENT",
+    "VOLATILITY_EXPANSION",
+    "ACCEPTANCE",
+    "REAL_",
+}
 
 
 def _utc_now() -> str:
@@ -58,8 +88,61 @@ def _is_reversal_family(model_id: str, model_family: str) -> bool:
     return any(token in text for token in tokens)
 
 
+def _is_continuation_family(model: dict[str, Any]) -> bool:
+    text = f"{model.get('model_id', '')} {model.get('model_family', '')}".upper()
+    return any(token in text for token in _CONTINUATION_FAMILIES)
+
+
 def _matched_conditions(model: dict[str, Any]) -> set[str]:
     return {str(item).upper() for item in (model.get("matched_conditions") or [])}
+
+
+def _condition_text(model: dict[str, Any], matched: set[str]) -> str:
+    evidence: list[str] = []
+    for result in (model.get("condition_results") or {}).values():
+        if not isinstance(result, dict):
+            continue
+        evidence.extend(str(item) for item in (result.get("evidence") or []))
+        evidence.extend(str(item) for item in (result.get("reason_codes") or []))
+    return " ".join([
+        str(model.get("model_id") or ""),
+        str(model.get("model_family") or ""),
+        str(model.get("dominant_context") or ""),
+        " ".join(matched),
+        " ".join(evidence),
+    ]).upper()
+
+
+def _has_supporting_evidence(model: dict[str, Any], matched: set[str]) -> bool:
+    if matched:
+        return True
+    for key in ("condition_score", "match_score", "core_score", "confirmation_score"):
+        score = _safe_float(model.get(key))
+        if score is not None and score > 0:
+            return True
+    return False
+
+
+def _trap_continuation_overlap(model: dict[str, Any], matched: set[str]) -> bool:
+    if not _is_continuation_family(model):
+        return False
+    text = _condition_text(model, matched)
+    has_trap = any(token in text for token in _TRAP_TOKENS)
+    has_continuation = any(token in text for token in _CONTINUATION_TOKENS)
+    return has_trap and has_continuation
+
+
+def _dominant_validated_cluster_direction() -> str:
+    clusters_payload = _load_json(CLUSTERS_PATH) or {}
+    clusters = [
+        cluster
+        for cluster in (clusters_payload.get("clusters") or [])
+        if str(cluster.get("direction") or "").upper() in {"LONG", "SHORT"}
+    ]
+    if not clusters:
+        return "NEUTRAL"
+    best = max(clusters, key=lambda item: _safe_float(item.get("cluster_score")) or 0.0)
+    return str(best.get("direction") or "NEUTRAL").upper()
 
 
 def _dominant_context(model: dict[str, Any], matched: set[str]) -> str:
@@ -149,7 +232,11 @@ def _coherence_score(
     return round(max(0.0, min(1.0, score)), 4)
 
 
-def _validated_record(model: dict[str, Any]) -> dict[str, Any]:
+def _validated_record(
+    model: dict[str, Any],
+    dominant_cluster_direction: str,
+    data_quality_level: str,
+) -> dict[str, Any]:
     matched = _matched_conditions(model)
     condition_results = model.get("condition_results") or {}
     semantic_errors: list[str] = []
@@ -163,13 +250,39 @@ def _validated_record(model: dict[str, Any]) -> dict[str, Any]:
 
     invalidation_score = _safe_float(model.get("invalidation_score")) or 0.0
     block_reasons: list[str] = []
+    risk_tags: list[str] = []
+    penalty_score = 0.0
+    direct_cluster_direction_conflict = (
+        dominant_cluster_direction in {"LONG", "SHORT"}
+        and str(model.get("direction") or "").upper() in {"LONG", "SHORT"}
+        and str(model.get("direction") or "").upper() != dominant_cluster_direction
+    )
+    zero_supporting_evidence = not _has_supporting_evidence(model, matched)
+    explicit_invalidation_matched = invalidation_score >= 0.5
+    data_quality_invalid = str(model.get("data_quality") or data_quality_level or "").upper() == "INVALID"
+    mixed_researchable = _trap_continuation_overlap(model, matched)
+
     if invalidation_score >= 0.5:
         block_reasons.append("INVALIDATION_DOMINANT")
+    if direct_cluster_direction_conflict:
+        block_reasons.append(f"DOMINANT_CLUSTER_DIRECTION_{dominant_cluster_direction}_CONTRADICTS_MODEL")
+    if zero_supporting_evidence:
+        block_reasons.append("ZERO_SUPPORTING_EVIDENCE")
+    if data_quality_invalid:
+        block_reasons.append("DATA_QUALITY_INVALID")
     if semantic_errors:
-        block_reasons.append("SEMANTIC_EVIDENCE_MISMATCH")
+        risk_tags.append("SEMANTIC_EVIDENCE_MISMATCH_SOFT")
+        penalty_score += 0.10
     severe_contradictions = [item for item in contradictions if "CONTRADICTION" in item or "DEPENDS_ON" in item]
     if severe_contradictions:
-        block_reasons.extend(severe_contradictions)
+        if mixed_researchable:
+            risk_tags.extend(severe_contradictions)
+        else:
+            risk_tags.extend(severe_contradictions)
+            penalty_score += 0.10
+    if mixed_researchable:
+        risk_tags.append("TRAP_CONTINUATION_OVERLAP")
+        penalty_score += 0.15
 
     coherence_score = _coherence_score(
         semantic_error_count=len(semantic_errors),
@@ -178,7 +291,14 @@ def _validated_record(model: dict[str, Any]) -> dict[str, Any]:
         direction_conflict=direction_conflict is not None,
     )
     paper_allowed = not block_reasons
-    semantic_status = "VALID" if paper_allowed and coherence_score >= 0.75 else "WARNING" if paper_allowed else "BLOCKED"
+    if paper_allowed and mixed_researchable:
+        semantic_status = "MIXED_BUT_RESEARCHABLE"
+    elif paper_allowed and coherence_score >= 0.75:
+        semantic_status = "VALID"
+    elif paper_allowed:
+        semantic_status = "WARNING"
+    else:
+        semantic_status = "BLOCKED"
 
     return {
         "model_instance_id": model.get("model_instance_id"),
@@ -194,6 +314,8 @@ def _validated_record(model: dict[str, Any]) -> dict[str, Any]:
         "dominant_context": _dominant_context(model, matched),
         "semantic_status": semantic_status,
         "paper_allowed": paper_allowed,
+        "risk_tags": sorted(set(risk_tags)),
+        "penalty_score": round(penalty_score, 4),
         "semantic_errors": semantic_errors,
         "contradictions": contradictions,
         "block_reasons": block_reasons,
@@ -205,17 +327,22 @@ def _validated_record(model: dict[str, Any]) -> dict[str, Any]:
 def run_model_semantic_validator() -> dict[str, Any]:
     hunter = _load_json(INPUT_PATH) or {}
     detected_models = list(hunter.get("detected_models") or [])
+    dominant_cluster_direction = _dominant_validated_cluster_direction()
+    data_quality_level = str((hunter.get("data_quality") or {}).get("level") or "HIGH").upper()
     validated_models: list[dict[str, Any]] = []
     blocked_models: list[dict[str, Any]] = []
     semantic_error_count = 0
     contradiction_count = 0
+    mixed_count = 0
 
     for model in detected_models:
-        record = _validated_record(model)
+        record = _validated_record(model, dominant_cluster_direction, data_quality_level)
         semantic_error_count += len(record.get("semantic_errors") or [])
         contradiction_count += len(record.get("contradictions") or [])
         if record.get("paper_allowed"):
             validated_models.append(record)
+            if record.get("semantic_status") == "MIXED_BUT_RESEARCHABLE":
+                mixed_count += 1
         else:
             blocked_models.append(record)
 
@@ -250,7 +377,9 @@ def run_model_semantic_validator() -> dict[str, Any]:
         "summary": {
             "input_detected": len(detected_models),
             "validated_count": len(validated_models),
+            "mixed_count": mixed_count,
             "blocked_count": len(blocked_models),
+            "hard_blocked_count": len(blocked_models),
             "semantic_error_count": semantic_error_count,
             "contradiction_count": contradiction_count,
         },

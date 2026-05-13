@@ -4,9 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from collections import Counter
 from pathlib import Path
 from typing import Any
+
+from src.simple.research_runtime import (
+    append_jsonl,
+    current_runtime_context,
+    load_json,
+    safe_float,
+    source_state_refs_from_paths,
+    stamp_payload,
+    utc_now,
+    write_json,
+)
 
 BLOCK_ID = "PAPER_TRADE_FACTORY"
 STATE_DIR = Path("state/simple")
@@ -25,41 +36,21 @@ DNA_PATH = STATE_DIR / "latest_mtf_candle_dna.json"
 LIQUIDITY_PATH = STATE_DIR / "latest_liquidity_map.json"
 BUSINESS_ZONE_PATH = STATE_DIR / "latest_business_zone.json"
 ATR_PATH = STATE_DIR / "latest_atr_state.json"
+RESEARCH_LIFECYCLE_PATH = STATE_DIR / "latest_research_paper_lifecycle.json"
+RESEARCH_LIFECYCLE_HISTORY_PATH = DATA_DIR / "research_paper_lifecycle_history.jsonl"
 
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _load_json(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-
-def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
-
-
-def _safe_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+MAX_OPEN_TOTAL = 20
+MAX_OPEN_PER_MODEL_ID = 1
+MAX_OPEN_PER_FAMILY_DIRECTION = 3
+NEW_TRADES_CAP_PER_LOOP = 3
+ALLOWED_RESEARCH_BANDS = {"STRONG_ACTIVE", "ACTIVE", "EARLY_RESEARCH"}
 
 
 def _current_price(observation: dict[str, Any], dna: dict[str, Any]) -> float | None:
-    price = _safe_float(((observation.get("market_snapshot") or {}).get("price")))
+    price = safe_float(((observation.get("market_snapshot") or {}).get("price")))
     if price is not None:
         return price
-    return _safe_float((((dna.get("1m") or {}).get("close"))))
+    return safe_float((((dna.get("1m") or {}).get("close"))))
 
 
 def _paper_trade_id(seed: str, entry: float | None) -> str:
@@ -70,7 +61,7 @@ def _paper_trade_id(seed: str, entry: float | None) -> str:
 def _target_reference(direction: str, entry: float, liquidity: dict[str, Any]) -> dict[str, Any] | None:
     best: dict[str, Any] | None = None
     for level in liquidity.get("detected_levels") or []:
-        price = _safe_float(level.get("price"))
+        price = safe_float(level.get("price"))
         if price is None:
             continue
         if direction == "LONG" and price <= entry:
@@ -80,7 +71,7 @@ def _target_reference(direction: str, entry: float, liquidity: dict[str, Any]) -
         if best is None:
             best = level
             continue
-        best_price = _safe_float(best.get("price"))
+        best_price = safe_float(best.get("price"))
         if best_price is None:
             best = level
             continue
@@ -150,17 +141,41 @@ def _cluster_setup_family(cluster: dict[str, Any]) -> str:
     )
 
 
+def _cluster_priority(cluster: dict[str, Any], dominant_setup_family: str) -> tuple[float, float]:
+    cluster_score = safe_float(cluster.get("cluster_score")) or 0.0
+    setup_family = _cluster_setup_family(cluster)
+    family_bonus = 1.0 if setup_family == dominant_setup_family else 0.0
+    return family_bonus, cluster_score
+
+
 def _activation_ready_clusters(activation: dict[str, Any]) -> list[dict[str, Any]]:
-    if not activation or not bool(activation.get("ready_for_paper_research")):
+    activation_band = str(activation.get("activation_band") or "").upper()
+    if (
+        not activation
+        or not bool(activation.get("ready_for_paper_research"))
+        or activation_band not in ALLOWED_RESEARCH_BANDS
+    ):
         return []
+
+    activation_direction = str(activation.get("direction") or "NEUTRAL").upper()
     selected: list[dict[str, Any]] = []
     for cluster in activation.get("source_clusters") or []:
         if not isinstance(cluster, dict):
             continue
-        direction = str(cluster.get("direction") or "UNKNOWN").upper()
-        if direction in {"LONG", "SHORT"} and cluster.get("paper_representative"):
+        representative = cluster.get("paper_representative") or {}
+        direction = str(representative.get("direction") or cluster.get("direction") or "UNKNOWN").upper()
+        if direction not in {"LONG", "SHORT"}:
+            continue
+        if activation_direction in {"LONG", "SHORT"} and direction != activation_direction:
+            continue
+        if representative:
             selected.append(cluster)
-    return selected
+    dominant_setup_family = str(activation.get("dominant_setup_family") or "NO_ACTIVE_SETUP_FAMILY")
+    return sorted(
+        selected,
+        key=lambda item: _cluster_priority(item, dominant_setup_family),
+        reverse=True,
+    )
 
 
 def _select_candidates(
@@ -184,134 +199,345 @@ def _select_candidates(
         return [], "MODEL_CLUSTER_BLOCKED", ["COOLDOWN_MISSING", "SEMANTIC_LAYER_MISSING"]
 
     if semantic and (semantic.get("validated_models") or semantic.get("blocked_models")):
-        records = [_singleton_cluster(model, "SEMANTIC_VALIDATION") for model in (semantic.get("validated_models") or []) if model.get("paper_allowed")]
+        records = [
+            _singleton_cluster(model, "SEMANTIC_VALIDATION")
+            for model in (semantic.get("validated_models") or [])
+            if model.get("paper_allowed")
+        ]
         return records, "MODEL_SEMANTIC_VALIDATION_FALLBACK", ["COOLDOWN_MISSING", "CLUSTERS_MISSING", "SEMANTIC_LAYER_USED"]
 
     return [], "NO_MODEL_INPUT", ["NO_TRADE_CANDIDATES"]
 
 
+def _family_direction_key(trade: dict[str, Any]) -> str:
+    family = str(trade.get("setup_family") or trade.get("dominant_setup_family") or "NO_ACTIVE_SETUP_FAMILY")
+    direction = str(trade.get("direction") or "UNKNOWN").upper()
+    return f"{family}|{direction}"
+
+
+def _context_contradiction_key(trade: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(trade.get("symbol") or "UNKNOWN"),
+            str(trade.get("context_id") or "UNKNOWN"),
+            str(trade.get("dominant_setup_family") or "NO_ACTIVE_SETUP_FAMILY"),
+            str(trade.get("liquidity_event") or "UNKNOWN"),
+        ]
+    )
+
+
+def _model_family_context_key(trade: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(trade.get("symbol") or "UNKNOWN"),
+            str(trade.get("context_id") or "UNKNOWN"),
+            str(trade.get("model_family") or "UNKNOWN"),
+        ]
+    )
+
+
+def _model_id_key(trade: dict[str, Any]) -> str:
+    return str(
+        trade.get("model_instance_id")
+        or trade.get("model_id")
+        or trade.get("dominant_model_id")
+        or trade.get("cluster_id")
+        or "UNKNOWN_MODEL"
+    )
+
+
+def _lifecycle_open_state(
+    lifecycle: dict[str, Any],
+) -> tuple[list[dict[str, Any]], Counter[str], Counter[str], dict[str, set[str]], dict[str, set[str]]]:
+    open_trades = [trade for trade in (lifecycle.get("open_trades") or []) if str(trade.get("status") or "").upper() == "OPEN"]
+    open_by_model_id: Counter[str] = Counter()
+    open_by_family_direction: Counter[str] = Counter()
+    open_context_directions: dict[str, set[str]] = {}
+    open_model_family_directions: dict[str, set[str]] = {}
+    for trade in open_trades:
+        open_by_model_id[_model_id_key(trade)] += 1
+        open_by_family_direction[_family_direction_key(trade)] += 1
+        open_context_directions.setdefault(_context_contradiction_key(trade), set()).add(str(trade.get("direction") or "UNKNOWN").upper())
+        open_model_family_directions.setdefault(_model_family_context_key(trade), set()).add(str(trade.get("direction") or "UNKNOWN").upper())
+    return open_trades, open_by_model_id, open_by_family_direction, open_context_directions, open_model_family_directions
+
+
+def _build_trade(
+    cluster: dict[str, Any],
+    source_selection_mode: str,
+    current_price: float | None,
+    atr_1m: float | None,
+    liquidity: dict[str, Any],
+    business_zone: dict[str, Any],
+    context: dict[str, Any],
+    activation_ready: bool,
+    dominant_setup_family: str,
+    activation_score: float,
+    activation_reasons: list[str],
+    activation_source_models: list[dict[str, Any]],
+    activation_source_clusters: list[dict[str, Any]],
+    activation_band: str,
+    activation_risk_tags: list[str],
+) -> dict[str, Any]:
+    representative = dict(cluster.get("paper_representative") or {})
+    direction = str(representative.get("direction") or cluster.get("direction") or "UNKNOWN").upper()
+    setup_family = _cluster_setup_family(cluster)
+    if setup_family == "NO_ACTIVE_SETUP_FAMILY" and activation_ready:
+        setup_family = dominant_setup_family
+
+    entry = current_price
+    invalid_reason = None
+    reason_codes: list[str] = list(cluster.get("reason_codes") or [])
+    if source_selection_mode == "MODEL_COOLDOWN_ALLOWED_CLUSTERS":
+        reason_codes.append("COOLDOWN_PASSED")
+    if source_selection_mode == "SETUP_FAMILY_ACTIVATION_READY":
+        reason_codes.append("SETUP_FAMILY_ACTIVATION_READY")
+    if entry is None or entry <= 0:
+        invalid_reason = "INVALID_ENTRY_PRICE"
+
+    if atr_1m is not None and atr_1m > 0 and entry is not None:
+        risk_distance = max(atr_1m, entry * 0.001)
+    else:
+        risk_distance = entry * 0.002 if entry is not None else None
+        reason_codes.append("FALLBACK_STOP_DISTANCE_USED")
+    if entry is None or risk_distance is None or risk_distance <= 0:
+        invalid_reason = invalid_reason or "RISK_DISTANCE_INVALID"
+
+    stop_loss = None
+    tp1 = None
+    tp2 = None
+    rr_tp1 = None
+    rr_tp2 = None
+    if invalid_reason is None and entry is not None and risk_distance is not None:
+        if direction == "LONG":
+            stop_loss = round(entry - risk_distance, 8)
+            tp1 = round(entry + 1.5 * risk_distance, 8)
+            tp2 = round(entry + 2.5 * risk_distance, 8)
+        else:
+            stop_loss = round(entry + risk_distance, 8)
+            tp1 = round(entry - 1.5 * risk_distance, 8)
+            tp2 = round(entry - 2.5 * risk_distance, 8)
+        rr_tp1 = 1.5
+        rr_tp2 = 2.5
+
+    source_cluster = dict(cluster)
+    source_cluster["paper_representative"] = representative
+    source_state_refs = source_state_refs_from_paths(
+        {
+            "setup_family_activation": SETUP_ACTIVATION_PATH,
+            "observation_factory": OBSERVATION_PATH,
+            "mtf_candle_dna": DNA_PATH,
+            "liquidity_map": LIQUIDITY_PATH,
+            "business_zone": BUSINESS_ZONE_PATH,
+            "atr_state": ATR_PATH,
+            "research_paper_lifecycle": RESEARCH_LIFECYCLE_PATH,
+        }
+    )
+    market_regime = str(representative.get("market_regime") or "UNKNOWN")
+    direction_resolution = representative.get("direction_resolution") or {"resolution_mode": "UNRESOLVED"}
+    return {
+        "paper_trade_id": _paper_trade_id(str(cluster.get("cluster_id") or representative.get("model_instance_id")), entry),
+        "context_id": context.get("context_id"),
+        "loop_id": context.get("loop_id"),
+        "symbol": context.get("symbol"),
+        "model_instance_id": representative.get("model_instance_id"),
+        "model_id": representative.get("model_id"),
+        "model_family": representative.get("model_family") or cluster.get("cluster_family"),
+        "setup_family": setup_family,
+        "dominant_setup_family": dominant_setup_family if activation_ready else setup_family,
+        "activation_score": activation_score if activation_ready else float(cluster.get("cluster_score") or representative.get("coherence_score") or representative.get("match_score") or 0.0),
+        "activation_band": activation_band if activation_ready else "CLUSTER_FALLBACK",
+        "risk_tags": activation_risk_tags if activation_ready else list(representative.get("risk_tags") or cluster.get("risk_tags") or []),
+        "activation_reasons": activation_reasons if activation_ready else ["ACTIVATION_LAYER_NOT_READY_FALLBACK_TO_ALLOWED_CLUSTER"],
+        "source_models": activation_source_models if activation_ready else [_compact_model(representative)],
+        "source_clusters": activation_source_clusters if activation_ready else [source_cluster],
+        "cluster_id": cluster.get("cluster_id"),
+        "dominant_model_id": cluster.get("dominant_model_id") or representative.get("model_id"),
+        "direction": direction,
+        "quality": representative.get("quality"),
+        "match_score": representative.get("match_score"),
+        "semantic_status": representative.get("semantic_status", "UNKNOWN"),
+        "coherence_score": representative.get("coherence_score") or cluster.get("cluster_score"),
+        "cooldown_key": representative.get("cooldown_key") or cluster.get("cooldown_key"),
+        "direction_resolution": direction_resolution,
+        "market_regime": market_regime,
+        "candle_category": representative.get("candle_category") or "UNKNOWN",
+        "structure_label": representative.get("structure_label") or "UNKNOWN",
+        "liquidity_event": representative.get("liquidity_event") or cluster.get("liquidity_event") or "UNKNOWN",
+        "entry": entry,
+        "stop_loss": stop_loss,
+        "tp1": tp1,
+        "tp2": tp2,
+        "rr_tp1": rr_tp1,
+        "rr_tp2": rr_tp2,
+        "risk_distance": risk_distance,
+        "target_reference": _target_reference(direction, entry or 0.0, liquidity) if entry is not None else None,
+        "opened_at_utc": utc_now(),
+        "max_holding_seconds": 1800,
+        "status": "INVALID" if invalid_reason else "OPEN",
+        "invalid_reason": invalid_reason,
+        "invalid_for_edge": bool(invalid_reason) or not context.get("context_id") or not representative.get("model_id"),
+        "reason_codes": sorted(set(reason_codes)),
+        "source_model_instance": representative.get("source_model_instance") or representative,
+        "source_cluster": source_cluster,
+        "source_business_zone_ref": business_zone.get("timestamp_utc"),
+        "source_state_refs": source_state_refs,
+    }
+
+
 def run_paper_trade_factory() -> dict[str, Any]:
-    hunter = _load_json(MODEL_HUNTER_PATH) or {}
-    semantic = _load_json(SEMANTIC_VALIDATION_PATH) or {}
-    clusters = _load_json(CLUSTERS_PATH) or {}
-    cooldown = _load_json(COOLDOWN_PATH) or {}
-    activation = _load_json(SETUP_ACTIVATION_PATH) or {}
-    observation = _load_json(OBSERVATION_PATH) or {}
-    dna = _load_json(DNA_PATH) or {}
-    liquidity = _load_json(LIQUIDITY_PATH) or {}
-    business_zone = _load_json(BUSINESS_ZONE_PATH) or {}
-    atr = _load_json(ATR_PATH) or {}
+    context = current_runtime_context()
+    hunter = load_json(MODEL_HUNTER_PATH) or {}
+    semantic = load_json(SEMANTIC_VALIDATION_PATH) or {}
+    clusters = load_json(CLUSTERS_PATH) or {}
+    cooldown = load_json(COOLDOWN_PATH) or {}
+    activation = load_json(SETUP_ACTIVATION_PATH) or {}
+    observation = load_json(OBSERVATION_PATH) or {}
+    dna = load_json(DNA_PATH) or {}
+    liquidity = load_json(LIQUIDITY_PATH) or {}
+    business_zone = load_json(BUSINESS_ZONE_PATH) or {}
+    atr = load_json(ATR_PATH) or {}
+    lifecycle = load_json(RESEARCH_LIFECYCLE_PATH) or {}
 
     current_price = _current_price(observation, dna)
-    atr_1m = _safe_float(((atr.get("1m") or {}).get("atr_14")))
+    atr_1m = safe_float(((atr.get("1m") or {}).get("atr_14")))
     selected_clusters, source_selection_mode, selection_reason_codes = _select_candidates(activation, semantic, clusters, cooldown)
-    trades: list[dict[str, Any]] = []
 
-    activation_ready = bool(activation.get("ready_for_paper_research"))
+    activation_band = str(activation.get("activation_band") or "WATCH_ONLY").upper()
+    activation_ready = bool(activation.get("ready_for_paper_research")) and activation_band in ALLOWED_RESEARCH_BANDS
     dominant_setup_family = str(activation.get("dominant_setup_family") or "NO_ACTIVE_SETUP_FAMILY")
     activation_score = float(activation.get("activation_score") or 0.0)
     activation_reasons = list(activation.get("activation_reasons") or [])
+    activation_risk_tags = list(activation.get("risk_tags") or [])
     activation_source_models = list(activation.get("source_models") or [])
     activation_source_clusters = list(activation.get("source_clusters") or [])
 
-    for cluster in selected_clusters:
-        representative = dict(cluster.get("paper_representative") or {})
-        direction = str(representative.get("direction") or cluster.get("direction") or "UNKNOWN").upper()
-        if direction not in ("LONG", "SHORT"):
+    open_trades, open_by_model_id, open_by_family_direction, open_context_directions, open_model_family_directions = _lifecycle_open_state(lifecycle)
+    pending_by_model_id: Counter[str] = Counter()
+    pending_by_family_direction: Counter[str] = Counter()
+    pending_context_directions: dict[str, set[str]] = {}
+    pending_model_family_directions: dict[str, set[str]] = {}
+    allowed_research_band_counts: Counter[str] = Counter()
+    paper_safety = {
+        "max_new_trades_per_loop": NEW_TRADES_CAP_PER_LOOP,
+        "max_open_total": MAX_OPEN_TOTAL,
+        "max_open_per_model_id": MAX_OPEN_PER_MODEL_ID,
+        "max_open_per_family_direction": MAX_OPEN_PER_FAMILY_DIRECTION,
+        "contradiction_guard_enabled": True,
+        "contradiction_key_fields": ["symbol", "context_id", "dominant_setup_family", "liquidity_event"],
+        "blocked_by_context_direction_conflict": 0,
+        "blocked_by_model_family_direction_conflict": 0,
+        "blocked_by_open_limit": 0,
+        "blocked_by_family_limit": 0,
+        "blocked_by_model_id_limit": 0,
+        "blocked_by_new_trade_cap": 0,
+        "allowed_research_band_counts": {},
+    }
+
+    trades: list[dict[str, Any]] = []
+    new_trade_slots_used = 0
+
+    ranked_clusters = sorted(
+        selected_clusters,
+        key=lambda item: _cluster_priority(item, dominant_setup_family),
+        reverse=True,
+    )
+
+    for cluster in ranked_clusters:
+        trade = _build_trade(
+            cluster=cluster,
+            source_selection_mode=source_selection_mode,
+            current_price=current_price,
+            atr_1m=atr_1m,
+            liquidity=liquidity,
+            business_zone=business_zone,
+            context=context,
+            activation_ready=activation_ready,
+            dominant_setup_family=dominant_setup_family,
+            activation_score=activation_score,
+            activation_reasons=activation_reasons,
+            activation_source_models=activation_source_models,
+            activation_source_clusters=activation_source_clusters,
+            activation_band=activation_band,
+            activation_risk_tags=activation_risk_tags,
+        )
+
+        if trade.get("status") == "INVALID":
+            trades.append(trade)
             continue
 
-        entry = current_price
-        invalid_reason = None
-        reason_codes: list[str] = list(cluster.get("reason_codes") or [])
-        if source_selection_mode == "MODEL_COOLDOWN_ALLOWED_CLUSTERS":
-            reason_codes.append("COOLDOWN_PASSED")
-        if source_selection_mode == "SETUP_FAMILY_ACTIVATION_READY":
-            reason_codes.append("SETUP_FAMILY_ACTIVATION_READY")
-        if entry is None or entry <= 0:
-            invalid_reason = "INVALID_ENTRY_PRICE"
+        model_id_key = _model_id_key(trade)
+        family_direction_key = _family_direction_key(trade)
+        context_conflict_key = _context_contradiction_key(trade)
+        model_family_context_key = _model_family_context_key(trade)
+        direction = str(trade.get("direction") or "UNKNOWN").upper()
+        total_open_after_pending = len(open_trades) + new_trade_slots_used
+        model_open_after_pending = open_by_model_id[model_id_key] + pending_by_model_id[model_id_key]
+        family_direction_open_after_pending = (
+            open_by_family_direction[family_direction_key]
+            + pending_by_family_direction[family_direction_key]
+        )
+        seen_context_directions = set(open_context_directions.get(context_conflict_key, set()))
+        seen_context_directions.update(pending_context_directions.get(context_conflict_key, set()))
+        seen_model_family_directions = set(open_model_family_directions.get(model_family_context_key, set()))
+        seen_model_family_directions.update(pending_model_family_directions.get(model_family_context_key, set()))
 
-        if atr_1m is not None and atr_1m > 0 and entry is not None:
-            risk_distance = max(atr_1m, entry * 0.001)
-        else:
-            risk_distance = entry * 0.002 if entry is not None else None
-            reason_codes.append("FALLBACK_STOP_DISTANCE_USED")
-        if entry is None or risk_distance is None or risk_distance <= 0:
-            invalid_reason = invalid_reason or "RISK_DISTANCE_INVALID"
+        guard_reason = None
+        if any(existing != direction for existing in seen_context_directions if existing in {"LONG", "SHORT"}):
+            paper_safety["blocked_by_context_direction_conflict"] += 1
+            guard_reason = "CONTEXT_DIRECTION_CONFLICT"
+        elif any(existing != direction for existing in seen_model_family_directions if existing in {"LONG", "SHORT"}):
+            paper_safety["blocked_by_model_family_direction_conflict"] += 1
+            guard_reason = "MODEL_FAMILY_DIRECTION_CONFLICT"
+        elif total_open_after_pending >= MAX_OPEN_TOTAL:
+            paper_safety["blocked_by_open_limit"] += 1
+            guard_reason = "OPEN_LIMIT_REACHED"
+        elif new_trade_slots_used >= NEW_TRADES_CAP_PER_LOOP:
+            paper_safety["blocked_by_new_trade_cap"] += 1
+            guard_reason = "NEW_TRADES_CAP_PER_LOOP_REACHED"
+        elif model_open_after_pending >= MAX_OPEN_PER_MODEL_ID:
+            paper_safety["blocked_by_model_id_limit"] += 1
+            guard_reason = "MODEL_ID_ALREADY_OPEN"
+        elif family_direction_open_after_pending >= MAX_OPEN_PER_FAMILY_DIRECTION:
+            paper_safety["blocked_by_family_limit"] += 1
+            guard_reason = "SETUP_FAMILY_DIRECTION_LIMIT_REACHED"
 
-        stop_loss = None
-        tp1 = None
-        tp2 = None
-        rr_tp1 = None
-        rr_tp2 = None
-        if invalid_reason is None and entry is not None and risk_distance is not None:
-            if direction == "LONG":
-                stop_loss = round(entry - risk_distance, 8)
-                tp1 = round(entry + 1.5 * risk_distance, 8)
-                tp2 = round(entry + 2.5 * risk_distance, 8)
-            else:
-                stop_loss = round(entry + risk_distance, 8)
-                tp1 = round(entry - 1.5 * risk_distance, 8)
-                tp2 = round(entry - 2.5 * risk_distance, 8)
-            rr_tp1 = 1.5
-            rr_tp2 = 2.5
+        if guard_reason:
+            trade["status"] = "BLOCKED"
+            trade["invalid_reason"] = guard_reason
+            trade["reason_codes"] = sorted(set([*(trade.get("reason_codes") or []), guard_reason]))
+            trades.append(trade)
+            continue
 
-        setup_family = dominant_setup_family if activation_ready else _cluster_setup_family(cluster)
-        source_cluster = dict(cluster)
-        source_cluster["paper_representative"] = representative
-        trade = {
-            "paper_trade_id": _paper_trade_id(str(cluster.get("cluster_id") or representative.get("model_instance_id")), entry),
-            "model_instance_id": representative.get("model_instance_id"),
-            "model_id": representative.get("model_id"),
-            "model_family": representative.get("model_family") or cluster.get("cluster_family"),
-            "setup_family": setup_family,
-            "dominant_setup_family": setup_family,
-            "activation_score": activation_score if activation_ready else float(cluster.get("cluster_score") or representative.get("coherence_score") or representative.get("match_score") or 0.0),
-            "activation_reasons": activation_reasons if activation_ready else ["ACTIVATION_LAYER_NOT_READY_FALLBACK_TO_ALLOWED_CLUSTER"],
-            "source_models": activation_source_models if activation_ready else [_compact_model(representative)],
-            "source_clusters": activation_source_clusters if activation_ready else [source_cluster],
-            "cluster_id": cluster.get("cluster_id"),
-            "dominant_model_id": cluster.get("dominant_model_id") or representative.get("model_id"),
-            "direction": direction,
-            "quality": representative.get("quality"),
-            "match_score": representative.get("match_score"),
-            "semantic_status": representative.get("semantic_status", "UNKNOWN"),
-            "coherence_score": representative.get("coherence_score") or cluster.get("cluster_score"),
-            "cooldown_key": representative.get("cooldown_key") or cluster.get("cooldown_key"),
-            "entry": entry,
-            "stop_loss": stop_loss,
-            "tp1": tp1,
-            "tp2": tp2,
-            "rr_tp1": rr_tp1,
-            "rr_tp2": rr_tp2,
-            "risk_distance": risk_distance,
-            "target_reference": _target_reference(direction, entry or 0.0, liquidity) if entry is not None else None,
-            "opened_at": _utc_now(),
-            "max_holding_seconds": 1800,
-            "status": "INVALID" if invalid_reason else "OPEN_CANDIDATE",
-            "invalid_reason": invalid_reason,
-            "reason_codes": sorted(set(reason_codes)),
-            "source_model_instance": representative.get("source_model_instance") or representative,
-            "source_cluster": source_cluster,
-            "source_business_zone_ref": business_zone.get("timestamp_utc"),
-        }
+        new_trade_slots_used += 1
+        pending_by_model_id[model_id_key] += 1
+        pending_by_family_direction[family_direction_key] += 1
+        pending_context_directions.setdefault(context_conflict_key, set()).add(direction)
+        pending_model_family_directions.setdefault(model_family_context_key, set()).add(direction)
+        allowed_research_band_counts[str(trade.get("activation_band") or "UNKNOWN")] += 1
         trades.append(trade)
 
-    output = {
-        "timestamp_utc": _utc_now(),
+    paper_safety["allowed_research_band_counts"] = dict(allowed_research_band_counts)
+
+    output = stamp_payload({
         "symbol": str(observation.get("symbol") or semantic.get("symbol") or hunter.get("symbol") or "BTCUSDT"),
         "block_id": BLOCK_ID,
         "source": {
             "source_mode": source_selection_mode,
         },
         "paper_trades": trades,
+        "paper_safety": paper_safety,
         "summary": {
             "candidate_models": len(hunter.get("detected_models") or []),
             "validated_models": len(semantic.get("validated_models") or []),
             "cluster_count": len(clusters.get("clusters") or []),
             "allowed_clusters": len(cooldown.get("allowed_clusters") or []),
             "setup_family_activation_ready": activation_ready,
-            "paper_trade_candidates": len([trade for trade in trades if trade.get("status") == "OPEN_CANDIDATE"]),
+            "activation_band": activation_band,
+            "paper_trade_candidates": len([trade for trade in trades if str(trade.get("status") or "").upper() == "OPEN"]),
             "invalid_candidates": len([trade for trade in trades if trade.get("status") == "INVALID"]),
+            "blocked_candidates": len([trade for trade in trades if trade.get("status") == "BLOCKED"]),
+            "existing_open_trades": len(open_trades),
         },
         "reason_codes": [
             f"PAPER_TRADES_{len(trades)}",
@@ -333,6 +559,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
                 "latest_liquidity_map": liquidity,
                 "latest_business_zone": business_zone,
                 "latest_atr_state": atr,
+                "latest_research_paper_lifecycle": lifecycle,
             }.items() if not payload],
         },
         "raw_model_observability": {
@@ -353,11 +580,10 @@ def run_paper_trade_factory() -> dict[str, Any]:
             "private_api_used": False,
             "live_order_sent": False,
         },
-    }
+    }, BLOCK_ID, str(observation.get("symbol") or semantic.get("symbol") or hunter.get("symbol") or "BTCUSDT"), context)
 
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
-    _append_jsonl(HISTORY_PATH, output)
+    write_json(OUTPUT_PATH, output)
+    append_jsonl(HISTORY_PATH, output)
     return output
 
 

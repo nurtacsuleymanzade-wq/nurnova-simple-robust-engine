@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.simple.research_runtime import current_runtime_context, source_state_refs_from_paths, stamp_payload
+
 BLOCK_ID = "UNIFIED_CONTEXT_ENGINE"
 STATE_DIR = Path("state/simple")
 DATA_DIR = Path("data/simple")
@@ -21,6 +23,9 @@ POSITIONING_PATH = STATE_DIR / "latest_positioning_context.json"
 MOMENTUM_PATH = STATE_DIR / "latest_momentum_continuation.json"
 DOUBLE_DIST_PATH = STATE_DIR / "latest_double_distribution_reversal.json"
 TRAP_PATH = STATE_DIR / "latest_trap_trader.json"
+OBSERVATION_PATH = STATE_DIR / "latest_observation_factory.json"
+MTF_DNA_PATH = STATE_DIR / "latest_mtf_candle_dna.json"
+ATR_PATH = STATE_DIR / "latest_atr_state.json"
 MARKET_STRUCTURE_PATH = STATE_DIR / "latest_market_structure.json"
 LIQUIDITY_MAP_PATH = STATE_DIR / "latest_liquidity_map.json"
 INTERPRETATION_PATH = STATE_DIR / "latest_interpretation.json"
@@ -60,6 +65,7 @@ def _quality_level(score: float) -> str:
 
 
 def run_unified_context_engine() -> dict[str, Any]:
+    runtime_context = current_runtime_context()
     business_zone = _load_json(BUSINESS_ZONE_PATH) or {}
     market_regime = _load_json(MARKET_REGIME_PATH) or {}
     intent_analysis = _load_json(INTENT_PATH) or {}
@@ -67,6 +73,9 @@ def run_unified_context_engine() -> dict[str, Any]:
     momentum = _load_json(MOMENTUM_PATH) or {}
     double_dist = _load_json(DOUBLE_DIST_PATH) or {}
     trap = _load_json(TRAP_PATH) or {}
+    observation = _load_json(OBSERVATION_PATH) or {}
+    mtf_dna = _load_json(MTF_DNA_PATH) or {}
+    atr = _load_json(ATR_PATH) or {}
     market_structure = _load_json(MARKET_STRUCTURE_PATH) or {}
     liquidity_map = _load_json(LIQUIDITY_MAP_PATH) or {}
     interpretation = _load_json(INTERPRETATION_PATH) or {}
@@ -100,6 +109,7 @@ def run_unified_context_engine() -> dict[str, Any]:
     tf_1m = (market_structure.get("1m") or {})
 
     active_setup_families: list[str] = []
+    secondary_active_families: list[str] = list(setup_activation.get("secondary_active_families") or [])
     if momentum.get("active"):
         active_setup_families.append("MOMENTUM_CONTINUATION")
     if trap.get("active"):
@@ -110,7 +120,10 @@ def run_unified_context_engine() -> dict[str, Any]:
         active_setup_families = list(dict.fromkeys(setup_activation.get("active_families") or active_setup_families))
 
     dominant_context = "UNKNOWN"
-    if momentum.get("active"):
+    activation_dominant_family = str(setup_activation.get("dominant_setup_family") or "NO_ACTIVE_SETUP_FAMILY")
+    if activation_dominant_family != "NO_ACTIVE_SETUP_FAMILY":
+        dominant_context = activation_dominant_family
+    elif momentum.get("active"):
         dominant_context = "MOMENTUM_CONTINUATION"
     elif trap.get("active"):
         dominant_context = "TRAP_REVERSAL"
@@ -201,14 +214,33 @@ def run_unified_context_engine() -> dict[str, Any]:
             "DOUBLE_DISTRIBUTION_REVERSAL",
         } else "NO_ACTIVE_SETUP_FAMILY"
     ready_for_paper_research = bool(setup_activation.get("ready_for_paper_research")) if setup_activation else (not missing_before_setup and dominant_context != "UNKNOWN")
+    activation_score = float(setup_activation.get("activation_score") or 0.0)
+    activation_band = str(setup_activation.get("activation_band") or "WATCH_ONLY")
+    raw_activation_score = float(setup_activation.get("raw_activation_score") or 0.0)
+    adjusted_activation_score = float(setup_activation.get("adjusted_activation_score") or activation_score or 0.0)
+    setup_risk_tags = list(setup_activation.get("risk_tags") or [])
+    setup_direction = str(setup_activation.get("direction") or "NEUTRAL")
+    setup_blocking_reasons = list(setup_activation.get("blocking_reasons") or [])
+    score_breakdown = dict(setup_activation.get("score_breakdown") or {})
+    direction_resolution = dict(setup_activation.get("direction_resolution") or {})
 
     output = {
-        "timestamp_utc": _utc_now(),
         "symbol": str(market_regime.get("symbol") or business_zone.get("symbol") or "BTCUSDT"),
-        "block_id": BLOCK_ID,
         "source": {
             "source_mode": "UNIFIED_CONTEXT_SYNTHESIS",
         },
+        "observation": observation,
+        "mtf_dna": mtf_dna,
+        "atr": atr,
+        "structure": market_structure,
+        "liquidity": liquidity_map,
+        "interpretation": interpretation,
+        "scenario": three_scenarios,
+        "business_zone": business_zone,
+        "regime": market_regime,
+        "intent": intent_analysis,
+        "positioning": positioning,
+        "setup_family_activation": setup_activation,
         "auction_context": {
             "regime": market_regime.get("regime", "UNKNOWN"),
             "value_position": value_position,
@@ -239,10 +271,39 @@ def run_unified_context_engine() -> dict[str, Any]:
             "squeeze_risk": pos.get("squeeze_risk", "UNKNOWN"),
         },
         "active_setup_families": active_setup_families,
+        "secondary_active_families": secondary_active_families,
         "dominant_context": dominant_context,
+        "directional_bias": str(market_regime.get("directional_bias") or setup_direction or "UNKNOWN"),
         "dominant_setup_family": dominant_setup_family,
+        "activation_score": activation_score,
+        "activation_band": activation_band,
+        "raw_activation_score": raw_activation_score,
+        "adjusted_activation_score": adjusted_activation_score,
+        "setup_risk_tags": setup_risk_tags,
         "ready_for_paper_research": ready_for_paper_research,
+        "setup_direction": setup_direction,
+        "blocking_reasons": setup_blocking_reasons,
+        "setup_blocking_reasons": setup_blocking_reasons,
+        "score_breakdown": score_breakdown,
+        "direction_resolution": direction_resolution,
+        "risk_tags": setup_risk_tags,
         "missing": missing_before_setup,
+        "source_state_refs": source_state_refs_from_paths(
+            {
+                "observation": OBSERVATION_PATH,
+                "mtf_dna": MTF_DNA_PATH,
+                "atr": ATR_PATH,
+                "structure": MARKET_STRUCTURE_PATH,
+                "liquidity": LIQUIDITY_MAP_PATH,
+                "interpretation": INTERPRETATION_PATH,
+                "scenario": THREE_SCENARIOS_PATH,
+                "business_zone": BUSINESS_ZONE_PATH,
+                "regime": MARKET_REGIME_PATH,
+                "intent": INTENT_PATH,
+                "positioning": POSITIONING_PATH,
+                "setup_family_activation": SETUP_ACTIVATION_PATH,
+            }
+        ),
         "readiness": {
             "context_ready_for_setup_selection": ready_for_paper_research,
             "missing_before_setup": missing_before_setup,
@@ -271,6 +332,7 @@ def run_unified_context_engine() -> dict[str, Any]:
             "live_order_sent": False,
         },
     }
+    output = stamp_payload(output, BLOCK_ID, output["symbol"], runtime_context)
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT_PATH.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
