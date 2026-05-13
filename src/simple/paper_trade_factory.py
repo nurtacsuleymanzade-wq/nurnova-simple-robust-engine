@@ -20,6 +20,8 @@ from src.simple.research_runtime import (
     utc_now,
     write_json,
 )
+from src.simple.signal_event_consolidator import derive_event_id, enrich_trade_event_fields
+from src.simple.signal_grade_engine import grade_signal_record
 
 BLOCK_ID = "PAPER_TRADE_FACTORY"
 STATE_DIR = Path("state/simple")
@@ -43,10 +45,12 @@ TIMEFRAME_RESOLUTION_PATH = epoch_state_path("latest_timeframe_resolution.json")
 MARKET_STRUCTURE_PATH = STATE_DIR / "latest_market_structure.json"
 INTERPRETATION_PATH = STATE_DIR / "latest_interpretation.json"
 
-MAX_OPEN_TOTAL = 20
+MAX_OPEN_TOTAL = 12
 MAX_OPEN_PER_MODEL_ID = 1
-MAX_OPEN_PER_FAMILY_DIRECTION = 3
-NEW_TRADES_CAP_PER_LOOP = 3
+MAX_OPEN_PER_DIRECTION = 6
+MAX_OPEN_PER_SETUP_FAMILY = 3
+MAX_OPEN_PER_EVENT_ID = 1
+NEW_TRADES_CAP_PER_LOOP = 2
 ALLOWED_RESEARCH_BANDS = {"STRONG_ACTIVE", "ACTIVE", "EARLY_RESEARCH"}
 MAX_TOP_CANDIDATES = 20
 
@@ -404,18 +408,25 @@ def _model_id_key(trade: dict[str, Any]) -> str:
 
 def _lifecycle_open_state(
     lifecycle: dict[str, Any],
-) -> tuple[list[dict[str, Any]], Counter[str], Counter[str], dict[str, set[str]], dict[str, set[str]]]:
+) -> tuple[list[dict[str, Any]], Counter[str], Counter[str], Counter[str], Counter[str], dict[str, set[str]], dict[str, set[str]]]:
     open_trades = [trade for trade in (lifecycle.get("open_trades") or []) if str(trade.get("status") or "").upper() == "OPEN"]
     open_by_model_id: Counter[str] = Counter()
     open_by_family_direction: Counter[str] = Counter()
+    open_by_direction: Counter[str] = Counter()
+    open_by_setup_family: Counter[str] = Counter()
+    open_by_event_id: Counter[str] = Counter()
     open_context_directions: dict[str, set[str]] = {}
     open_model_family_directions: dict[str, set[str]] = {}
     for trade in open_trades:
+        event_id = str(trade.get("event_id") or derive_event_id(trade))
         open_by_model_id[_model_id_key(trade)] += 1
         open_by_family_direction[_family_direction_key(trade)] += 1
+        open_by_direction[str(trade.get("direction") or "UNKNOWN").upper()] += 1
+        open_by_setup_family[str(trade.get("setup_family") or "NO_ACTIVE_SETUP_FAMILY")] += 1
+        open_by_event_id[event_id] += 1
         open_context_directions.setdefault(_context_contradiction_key(trade), set()).add(str(trade.get("direction") or "UNKNOWN").upper())
         open_model_family_directions.setdefault(_model_family_context_key(trade), set()).add(str(trade.get("direction") or "UNKNOWN").upper())
-    return open_trades, open_by_model_id, open_by_family_direction, open_context_directions, open_model_family_directions
+    return open_trades, open_by_model_id, open_by_family_direction, open_by_direction, open_by_setup_family, open_by_event_id, open_context_directions, open_model_family_directions
 
 
 def _build_trade(
@@ -545,10 +556,22 @@ def _build_trade(
         "cause_chain": _cause_chain(),
     }
     trade = _enrich_timeframe_plan(trade, timeframe_resolution, setup_family, representative.get("model_id"))
+    activation_payload = {
+        "activation_score": activation_score,
+        "activation_band": activation_band,
+        "direction": direction,
+        "risk_tags": activation_risk_tags,
+        "source_models": activation_source_models,
+    }
+    grade = grade_signal_record(trade, activation_payload, timeframe_resolution)
+    trade.update(grade)
+    trade = enrich_trade_event_fields(trade, grade)
+    trade["valid_for_edge"] = False
+    trade["execution_safety"] = {"live_order_sent": False, "private_api_used": False}
     edge_invalid = _edge_invalid(trade)
     required_issues = _required_field_issues(trade)
     trade["invalid_for_edge"] = bool(trade.get("invalid_for_edge")) or edge_invalid or bool(required_issues)
-    trade["valid_for_edge"] = not trade["invalid_for_edge"]
+    trade["valid_for_edge"] = False
     trade["valid_for_lifecycle"] = not bool(required_issues)
     if edge_invalid:
         trade["reason_codes"] = sorted(set([*(trade.get("reason_codes") or []), "MISSING_TIMEFRAME_OR_RR"]))
@@ -608,6 +631,17 @@ def _compact_trade_snapshot(trade: dict[str, Any]) -> dict[str, Any]:
             "invalid_for_edge",
             "cause_chain",
         "source_state_refs",
+        "event_id",
+        "event_bucket_5m",
+        "event_confluence_count",
+        "signal_grade",
+        "grade_score",
+        "grade_reasons",
+        "grade_blockers",
+        "a_plus_ready",
+        "supporting_models",
+        "supporting_setups",
+        "execution_safety",
     )
     return {field: trade.get(field) for field in keep_fields if field in trade}
 
@@ -641,9 +675,21 @@ def run_paper_trade_factory() -> dict[str, Any]:
     activation_source_models = list(activation.get("source_models") or [])
     activation_source_clusters = list(activation.get("source_clusters") or [])
 
-    open_trades, open_by_model_id, open_by_family_direction, open_context_directions, open_model_family_directions = _lifecycle_open_state(lifecycle)
+    (
+        open_trades,
+        open_by_model_id,
+        open_by_family_direction,
+        open_by_direction,
+        open_by_setup_family,
+        open_by_event_id,
+        open_context_directions,
+        open_model_family_directions,
+    ) = _lifecycle_open_state(lifecycle)
     pending_by_model_id: Counter[str] = Counter()
     pending_by_family_direction: Counter[str] = Counter()
+    pending_by_direction: Counter[str] = Counter()
+    pending_by_setup_family: Counter[str] = Counter()
+    pending_by_event_id: Counter[str] = Counter()
     pending_context_directions: dict[str, set[str]] = {}
     pending_model_family_directions: dict[str, set[str]] = {}
     allowed_research_band_counts: Counter[str] = Counter()
@@ -651,13 +697,17 @@ def run_paper_trade_factory() -> dict[str, Any]:
         "max_new_trades_per_loop": NEW_TRADES_CAP_PER_LOOP,
         "max_open_total": MAX_OPEN_TOTAL,
         "max_open_per_model_id": MAX_OPEN_PER_MODEL_ID,
-        "max_open_per_family_direction": MAX_OPEN_PER_FAMILY_DIRECTION,
+        "max_open_per_direction": MAX_OPEN_PER_DIRECTION,
+        "max_open_per_setup_family": MAX_OPEN_PER_SETUP_FAMILY,
+        "max_open_per_event_id": MAX_OPEN_PER_EVENT_ID,
         "contradiction_guard_enabled": True,
         "contradiction_key_fields": ["symbol", "context_id", "dominant_setup_family", "liquidity_event"],
         "blocked_by_context_direction_conflict": 0,
         "blocked_by_model_family_direction_conflict": 0,
         "blocked_by_open_limit": 0,
         "blocked_by_family_limit": 0,
+        "blocked_by_direction_limit": 0,
+        "blocked_by_event_limit": 0,
         "blocked_by_model_id_limit": 0,
         "blocked_by_new_trade_cap": 0,
         "allowed_research_band_counts": {},
@@ -698,6 +748,8 @@ def run_paper_trade_factory() -> dict[str, Any]:
 
         model_id_key = _model_id_key(trade)
         family_direction_key = _family_direction_key(trade)
+        setup_family_key = str(trade.get("setup_family") or "NO_ACTIVE_SETUP_FAMILY")
+        event_id_key = str(trade.get("event_id") or derive_event_id(trade))
         context_conflict_key = _context_contradiction_key(trade)
         model_family_context_key = _model_family_context_key(trade)
         direction = str(trade.get("direction") or "UNKNOWN").upper()
@@ -707,6 +759,9 @@ def run_paper_trade_factory() -> dict[str, Any]:
             open_by_family_direction[family_direction_key]
             + pending_by_family_direction[family_direction_key]
         )
+        direction_open_after_pending = open_by_direction[direction] + pending_by_direction[direction]
+        setup_family_open_after_pending = open_by_setup_family[setup_family_key] + pending_by_setup_family[setup_family_key]
+        event_open_after_pending = open_by_event_id[event_id_key] + pending_by_event_id[event_id_key]
         seen_context_directions = set(open_context_directions.get(context_conflict_key, set()))
         seen_context_directions.update(pending_context_directions.get(context_conflict_key, set()))
         seen_model_family_directions = set(open_model_family_directions.get(model_family_context_key, set()))
@@ -721,20 +776,34 @@ def run_paper_trade_factory() -> dict[str, Any]:
             guard_reason = "MODEL_FAMILY_DIRECTION_CONFLICT"
         elif total_open_after_pending >= MAX_OPEN_TOTAL:
             paper_safety["blocked_by_open_limit"] += 1
-            guard_reason = "OPEN_LIMIT_REACHED"
+            guard_reason = "PAPER_OPEN_LIMIT_REACHED"
+        elif str(trade.get("signal_grade") or "D").upper() == "D":
+            guard_reason = "SIGNAL_GRADE_D_BLOCKED"
         elif new_trade_slots_used >= NEW_TRADES_CAP_PER_LOOP:
             paper_safety["blocked_by_new_trade_cap"] += 1
             guard_reason = "NEW_TRADES_CAP_PER_LOOP_REACHED"
+        elif event_open_after_pending >= MAX_OPEN_PER_EVENT_ID:
+            paper_safety["blocked_by_event_limit"] += 1
+            guard_reason = "EVENT_ALREADY_OPEN"
+        elif direction_open_after_pending >= MAX_OPEN_PER_DIRECTION:
+            paper_safety["blocked_by_direction_limit"] += 1
+            guard_reason = "PAPER_OPEN_LIMIT_REACHED"
+        elif setup_family_open_after_pending >= MAX_OPEN_PER_SETUP_FAMILY:
+            paper_safety["blocked_by_family_limit"] += 1
+            guard_reason = "SETUP_FAMILY_LIMIT_REACHED"
         elif model_open_after_pending >= MAX_OPEN_PER_MODEL_ID:
             paper_safety["blocked_by_model_id_limit"] += 1
             guard_reason = "MODEL_ID_ALREADY_OPEN"
-        elif family_direction_open_after_pending >= MAX_OPEN_PER_FAMILY_DIRECTION:
+        elif family_direction_open_after_pending >= MAX_OPEN_PER_SETUP_FAMILY:
             paper_safety["blocked_by_family_limit"] += 1
-            guard_reason = "SETUP_FAMILY_DIRECTION_LIMIT_REACHED"
+            guard_reason = "SETUP_FAMILY_LIMIT_REACHED"
 
         if guard_reason:
             trade["status"] = "BLOCKED"
             trade["invalid_reason"] = guard_reason
+            if guard_reason == "EVENT_ALREADY_OPEN":
+                trade["supporting_models"] = sorted(set([*(trade.get("supporting_models") or []), str(trade.get("model_id") or "UNKNOWN")]))
+                trade["supporting_setups"] = sorted(set([*(trade.get("supporting_setups") or []), str(trade.get("setup_family") or "UNKNOWN")]))
             trade["reason_codes"] = sorted(set([*(trade.get("reason_codes") or []), guard_reason]))
             trades.append(trade)
             continue
@@ -742,6 +811,9 @@ def run_paper_trade_factory() -> dict[str, Any]:
         new_trade_slots_used += 1
         pending_by_model_id[model_id_key] += 1
         pending_by_family_direction[family_direction_key] += 1
+        pending_by_direction[direction] += 1
+        pending_by_setup_family[setup_family_key] += 1
+        pending_by_event_id[event_id_key] += 1
         pending_context_directions.setdefault(context_conflict_key, set()).add(direction)
         pending_model_family_directions.setdefault(model_family_context_key, set()).add(direction)
         allowed_research_band_counts[str(trade.get("activation_band") or "UNKNOWN")] += 1
@@ -808,6 +880,9 @@ def run_paper_trade_factory() -> dict[str, Any]:
             "existing_open_trades": len(open_trades),
             "open_by_model_id": dict(open_by_model_id),
             "open_by_family_direction": dict(open_by_family_direction),
+            "open_by_direction": dict(open_by_direction),
+            "open_by_setup_family": dict(open_by_setup_family),
+            "open_by_event_id": dict(open_by_event_id),
         },
         "feeds_next": [
             "RESEARCH_PAPER_LIFECYCLE_ENGINE",

@@ -15,16 +15,14 @@ ACCOUNTING_PATH = epoch_state_path("latest_outcome_accounting.json")
 MAX_HISTORY_ROWS = 5000
 
 GROUP_FIELDS = (
-    "symbol",
     "model_id",
     "setup_family",
+    "signal_grade",
     "direction",
     "primary_tf",
-    "trigger_tf",
     "context_tf",
-    "structure_tf",
     "plan_style",
-    "expected_hold_label",
+    "event_confluence_count",
 )
 
 
@@ -39,15 +37,24 @@ def _closed_records() -> dict[str, dict[str, Any]]:
 
 
 def _clean_sample(trade: dict[str, Any]) -> bool:
+    required = tuple(field for field in GROUP_FIELDS if field not in {"signal_grade", "event_confluence_count"})
     return (
         str(trade.get("epoch_id") or "") == ACTIVE_EPOCH_ID
         and str(trade.get("outcome_status") or "").upper() == "CLOSED"
         and trade.get("valid_for_edge") is not False
-        and all(trade.get(field) not in (None, "") for field in GROUP_FIELDS)
+        and all(trade.get(field) not in (None, "") for field in required)
         and safe_float(trade.get("rr1")) is not None
         and safe_float(trade.get("rr2")) is not None
         and safe_float(trade.get("r_result")) is not None
     )
+
+
+def _group_value(trade: dict[str, Any], field: str) -> str:
+    if field == "signal_grade":
+        return str(trade.get(field) or "LEGACY_UNGRADED")
+    if field == "event_confluence_count":
+        return str(trade.get(field) or 1)
+    return str(trade.get(field) or "UNKNOWN")
 
 
 def _group_metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -87,7 +94,7 @@ def run_research_edge_matrix_engine() -> dict[str, Any]:
         if not _clean_sample(trade):
             invalid_sample_count += 1
             continue
-        key = tuple(str(trade.get(field) or "UNKNOWN") for field in GROUP_FIELDS)
+        key = tuple(_group_value(trade, field) for field in GROUP_FIELDS)
         grouped.setdefault(key, []).append(trade)
 
     groups: list[dict[str, Any]] = []
@@ -98,8 +105,18 @@ def run_research_edge_matrix_engine() -> dict[str, Any]:
 
     groups.sort(key=lambda item: (int(item.get("sample_size") or 0), safe_float(item.get("expectancy")) or -9999), reverse=True)
     best_group = groups[0] if groups else {}
-    if not groups:
+    mature_groups = [group for group in groups if int(group.get("sample_size") or 0) >= 20]
+    best_winrate_model = max(mature_groups, key=lambda item: safe_float(item.get("winrate")) or 0.0) if mature_groups else {}
+    best_avg_r_model = max(mature_groups, key=lambda item: safe_float(item.get("avg_r")) or -9999.0) if mature_groups else {}
+    a_plus_groups = [group for group in mature_groups if str(group.get("signal_grade") or "") == "A_PLUS"]
+    best_a_plus_model = max(a_plus_groups, key=lambda item: safe_float(item.get("avg_r")) or -9999.0) if a_plus_groups else {}
+    worst_model = min(mature_groups, key=lambda item: safe_float(item.get("avg_r")) or 9999.0) if mature_groups else {}
+    sample_building_models = [group for group in groups if int(group.get("sample_size") or 0) < 20][:20]
+    accounting_clean_count = int(((accounting.get("summary") or {}).get("clean_sample_count")) or 0)
+    if not groups and accounting_clean_count <= 0:
         edge_status = "NO_CLEAN_SAMPLES"
+    elif not groups:
+        edge_status = "SAMPLE_BUILDING"
     elif int(best_group.get("sample_size") or 0) < 20:
         edge_status = "SAMPLE_BUILDING"
     else:
@@ -114,7 +131,7 @@ def run_research_edge_matrix_engine() -> dict[str, Any]:
             "edge_status": edge_status,
             "summary": {
                 "group_count": len(groups),
-                "clean_sample_count": int(((accounting.get("summary") or {}).get("clean_sample_count")) or 0),
+                "clean_sample_count": accounting_clean_count,
                 "closed_trade_count": int(((accounting.get("summary") or {}).get("closed_count")) or 0),
                 "best_model_id": best_group.get("model_id"),
                 "best_sample_size": int(best_group.get("sample_size") or 0),
@@ -122,6 +139,11 @@ def run_research_edge_matrix_engine() -> dict[str, Any]:
                 "best_winrate": best_group.get("winrate"),
                 "invalid_sample_count": invalid_sample_count,
             },
+            "best_winrate_model": best_winrate_model,
+            "best_avg_r_model": best_avg_r_model,
+            "best_a_plus_model": best_a_plus_model,
+            "worst_model": worst_model,
+            "sample_building_models": sample_building_models,
             "data_quality": {
                 "level": "HIGH" if accounting else "MEDIUM",
                 "missing_inputs": [

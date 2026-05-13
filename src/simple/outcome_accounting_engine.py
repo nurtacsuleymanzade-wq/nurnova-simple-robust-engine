@@ -124,12 +124,13 @@ def run_outcome_accounting_engine() -> dict[str, Any]:
     avg_r = round(
         sum(safe_float(item.get("r_result")) or 0.0 for item in clean_closed_samples) / len(clean_closed_samples),
         4,
-    ) if clean_closed_samples else 0.0
+    ) if clean_closed_samples else None
+    expectancy = avg_r if len(clean_closed_samples) >= 20 else None
     if closed_count != wins + losses + expired:
         mismatch_flags.append("CLOSED_COUNT_MISMATCH")
     if duplicates > 0:
         mismatch_flags.append("DUPLICATE_PAPER_TRADE_ID")
-    if winrate == 0 and avg_r > 0:
+    if winrate == 0 and (avg_r or 0.0) > 0:
         mismatch_flags.append("ACCOUNTING_MISMATCH")
 
     accounting_status = "OK" if not mismatch_flags else "CORRUPTED"
@@ -142,24 +143,33 @@ def run_outcome_accounting_engine() -> dict[str, Any]:
                 "closed_count": closed_count,
                 "wins": wins,
                 "losses": losses,
+                "tp_hits": wins,
+                "sl_hits": losses,
                 "expired": expired,
                 "invalid": invalid,
                 "clean_sample_count": len(clean_closed_samples),
                 "invalid_sample_count": len(invalid_samples),
                 "duplicate_paper_trade_id_count": duplicates,
                 "winrate": winrate,
-                "expectancy": avg_r,
+                "expectancy": expectancy,
                 "avg_r": avg_r,
             },
+            "tp_hits": wins,
+            "sl_hits": losses,
+            "expired": expired,
+            "winrate": winrate,
+            "avg_r": avg_r,
+            "clean_sample_count": len(clean_closed_samples),
+            "accounting_status": accounting_status,
             "closed_samples": clean_closed_samples[-200:],
             "invalid_samples": invalid_samples[-200:],
             "consistency_checks": {
                 "closed_count_equals_components": closed_count == (wins + losses + expired),
                 "duplicate_paper_trade_id_count": duplicates,
                 "winrate_uses_clean_universe": True,
+                "expectancy_requires_20_clean_samples": len(clean_closed_samples) >= 20 if expectancy is not None else True,
                 "expectancy_uses_clean_universe": True,
             },
-            "accounting_status": accounting_status,
             "accounting_flags": mismatch_flags,
             "execution_safety": {
                 "safe_to_open_real_trade": False,

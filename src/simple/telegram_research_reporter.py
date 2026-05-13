@@ -20,10 +20,14 @@ FACTORY_PATH = epoch_state_path("latest_paper_trade_factory.json")
 LIFECYCLE_PATH = epoch_state_path("latest_research_paper_lifecycle.json")
 ACCOUNTING_PATH = epoch_state_path("latest_outcome_accounting.json")
 EDGE_PATH = epoch_state_path("latest_research_edge_matrix.json")
+EVENT_PATH = epoch_state_path("latest_signal_event.json")
+GRADE_PATH = epoch_state_path("latest_signal_grade.json")
+CONTRACT_PATH = epoch_state_path("latest_signal_data_contract.json")
 STATE_DIR = Path("state/simple")
 REPORTED_TRADES_PATH = epoch_state_path("telegram_reported_trades.json")
 SUMMARY_HASH_PATH = epoch_state_path("last_summary_hash.json")
-CLOSED_STATUSES = {"TP1_HIT", "TP2_HIT", "SL_HIT", "EXPIRED"}
+LAST_SUMMARY_SENT_PATH = epoch_state_path("last_summary_sent_at.json")
+SUMMARY_INTERVAL_SECONDS = 15 * 60
 
 
 def _utc_now() -> str:
@@ -57,6 +61,7 @@ def _load_reported_state() -> dict[str, Any]:
         "reported_closed_trade_ids": set(str(item) for item in payload.get("reported_closed_trade_ids") or [] if item),
         "reported_open_hashes": set(str(item) for item in payload.get("reported_open_hashes") or [] if item),
         "reported_closed_hashes": set(str(item) for item in payload.get("reported_closed_hashes") or [] if item),
+        "reported_event_ids": set(str(item) for item in payload.get("reported_event_ids") or [] if item),
     }
 
 
@@ -68,6 +73,7 @@ def _write_reported_state(state: dict[str, Any]) -> None:
             "reported_closed_trade_ids": sorted(state["reported_closed_trade_ids"]),
             "reported_open_hashes": sorted(state["reported_open_hashes"]),
             "reported_closed_hashes": sorted(state["reported_closed_hashes"]),
+            "reported_event_ids": sorted(state["reported_event_ids"]),
             "updated_at_utc": _utc_now(),
         },
     )
@@ -79,6 +85,33 @@ def _load_summary_hash() -> str:
 
 def _write_summary_hash(summary_hash: str, preview: str) -> None:
     write_json(SUMMARY_HASH_PATH, {"last_summary_hash": summary_hash, "last_summary_preview": preview[:500], "updated_at_utc": _utc_now()})
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _summary_rate_limit_status() -> tuple[bool, str, float | None]:
+    payload = load_json(LAST_SUMMARY_SENT_PATH) or {}
+    last = _parse_utc(payload.get("last_summary_sent_at_utc"))
+    if last is None:
+        return True, "READY", None
+    elapsed = max(0.0, (datetime.now(timezone.utc) - last).total_seconds())
+    if elapsed < SUMMARY_INTERVAL_SECONDS:
+        return False, "SUPPRESSED_15M_RATE_LIMIT", elapsed
+    return True, "READY", elapsed
+
+
+def _write_summary_sent_status(status: str) -> None:
+    payload = load_json(LAST_SUMMARY_SENT_PATH) or {}
+    if status != "SUPPRESSED_15M_RATE_LIMIT":
+        payload["last_summary_sent_at_utc"] = _utc_now()
+    payload["status"] = status
+    payload["updated_at_utc"] = _utc_now()
+    write_json(LAST_SUMMARY_SENT_PATH, payload)
 
 
 def _send_telegram(token: str, chat_id: str, text: str) -> dict[str, Any]:
@@ -111,87 +144,112 @@ def _active_setup(factory: dict[str, Any], lifecycle: dict[str, Any], edge: dict
     }
 
 
-def _instant_signal_message(trade: dict[str, Any]) -> str:
+def _instant_signal_message(event: dict[str, Any], edge: dict[str, Any]) -> str:
+    edge_summary = edge.get("summary") or {}
     return "\n".join(
         [
-            "NURNOVA SIGNAL",
+            "NURNOVA A+ SIGNAL",
             "",
-            f"Epoch: {ACTIVE_EPOCH_ID}",
-            f"Pair: {trade.get('symbol') or 'BTCUSDT'}",
-            f"Setup: {trade.get('setup_family') or 'UNKNOWN'}",
-            f"Direction: {trade.get('direction') or 'UNKNOWN'}",
-            f"Primary TF: {trade.get('primary_tf') or 'n/a'}",
-            f"Context TF: {trade.get('context_tf') or 'n/a'}",
-            f"Entry: {_format_number(trade.get('entry'))}",
-            f"Stop: {_format_number(trade.get('stop_loss'))}",
-            f"TP1: {_format_number(trade.get('tp1'))}",
-            f"TP2: {_format_number(trade.get('tp2'))}",
-            f"RR1: {_format_number(trade.get('rr1'))}",
-            f"RR2: {_format_number(trade.get('rr2'))}",
+            f"Pair: {event.get('symbol') or 'BTCUSDT'}",
+            f"Direction: {event.get('direction') or 'UNKNOWN'}",
+            f"Grade: {event.get('signal_grade') or 'UNKNOWN'}",
+            f"Event ID: {event.get('event_id') or 'UNKNOWN'}",
+            "",
+            f"Primary Setup: {event.get('primary_setup') or 'UNKNOWN'}",
+            f"Primary Model: {event.get('primary_model') or 'UNKNOWN'}",
+            f"Supporting Models: {', '.join(event.get('supporting_models') or []) or 'none'}",
+            "",
+            "Timeframe:",
+            f"Primary TF: {event.get('primary_tf') or 'n/a'}",
+            f"Context TF: {event.get('context_tf') or 'n/a'}",
+            f"Expected Hold: {event.get('expected_hold_label') or 'n/a'}",
+            "",
+            "Trade Plan:",
+            f"Entry: {_format_number(event.get('entry'))}",
+            f"Stop: {_format_number(event.get('stop_loss'))}",
+            f"TP1: {_format_number(event.get('tp1'))}",
+            f"TP2: {_format_number(event.get('tp2'))}",
+            f"RR1: {_format_number(event.get('rr1'))}",
+            f"RR2: {_format_number(event.get('rr2'))}",
+            "",
+            "Why:",
+            f"- Activation: {_format_number(event.get('activation_score'), 2)}",
+            f"- Timeframe: {event.get('primary_tf') or 'n/a'} / {event.get('context_tf') or 'n/a'}",
+            f"- RR: {_format_number(event.get('rr1'))} / {_format_number(event.get('rr2'))}",
+            f"- Model Confluence: {event.get('event_confluence_count') or 1}",
+            "",
+            "Edge:",
+            f"Current Status: {edge.get('edge_status') or 'NO_CLEAN_SAMPLES'}",
+            f"Model Sample Count: {edge_summary.get('best_sample_size') or 0}",
+            f"Best Model: {edge_summary.get('best_model_id') or 'SAMPLE_BUILDING'}",
+            "",
+            "Safety:",
+            "Paper Trade Only",
             "Live Trade OFF",
         ]
     )
 
 
-def _result_message(trade: dict[str, Any], accounting: dict[str, Any]) -> str:
-    stats = accounting.get("summary") or {}
-    return "\n".join(
-        [
-            "NURNOVA RESULT",
-            "",
-            f"Epoch: {ACTIVE_EPOCH_ID}",
-            f"Pair: {trade.get('symbol') or 'BTCUSDT'}",
-            f"Setup: {trade.get('setup_family') or 'UNKNOWN'}",
-            f"Direction: {trade.get('direction') or 'UNKNOWN'}",
-            f"Result: {trade.get('close_reason') or trade.get('status') or 'UNKNOWN'}",
-            f"R Result: {_format_number(trade.get('r_result'))}",
-            f"Winrate: {_format_percent(stats.get('winrate'))}",
-            f"Average R: {_format_number(stats.get('avg_r'))}",
-            "Live Trade OFF",
-        ]
-    )
-
-
-def _summary_message(factory: dict[str, Any], lifecycle: dict[str, Any], accounting: dict[str, Any], edge: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def _summary_message(factory: dict[str, Any], lifecycle: dict[str, Any], accounting: dict[str, Any], edge: dict[str, Any], event_payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     active = _active_setup(factory, lifecycle, edge)
+    latest_event = event_payload.get("latest_event") or {}
     lifecycle_summary = lifecycle.get("summary") or {}
     accounting_summary = accounting.get("summary") or {}
     edge_summary = edge.get("summary") or {}
+    best_winrate_model = edge.get("best_winrate_model") or {}
+    best_avg_r_model = edge.get("best_avg_r_model") or {}
     payload = {
         "epoch_id": ACTIVE_EPOCH_ID,
+        "pair": factory.get("symbol") or lifecycle.get("symbol") or latest_event.get("symbol") or "BTCUSDT",
         "active_setup": active["setup_family"],
         "primary_tf": active["primary_tf"],
         "context_tf": active["context_tf"],
         "open_trades": int(lifecycle_summary.get("open") or len(lifecycle.get("open_trades") or [])),
         "closed_trades": int(accounting_summary.get("closed_count") or 0),
-        "wins": int(accounting_summary.get("wins") or 0),
-        "losses": int(accounting_summary.get("losses") or 0),
+        "tp_hits": int(accounting_summary.get("tp_hits") or accounting_summary.get("wins") or 0),
+        "sl_hits": int(accounting_summary.get("sl_hits") or accounting_summary.get("losses") or 0),
         "expired": int(accounting_summary.get("expired") or 0),
         "winrate": accounting_summary.get("winrate"),
         "average_r": accounting_summary.get("avg_r"),
         "edge_status": edge.get("edge_status") or "NO_CLEAN_SAMPLES",
-        "best_model": edge_summary.get("best_model_id") or active["model_id"],
+        "best_model": edge_summary.get("best_model_id") or (best_avg_r_model.get("model_id") or active["model_id"]),
+        "best_model_winrate": best_winrate_model.get("winrate") if best_winrate_model else edge_summary.get("best_winrate"),
+        "best_model_avg_r": best_avg_r_model.get("avg_r") if best_avg_r_model else edge_summary.get("best_expectancy"),
         "sample_count": int(edge_summary.get("best_sample_size") or accounting_summary.get("clean_sample_count") or 0),
         "live_trade": "OFF",
     }
     lines = [
-        "NURNOVA RESEARCH REPORT",
+        "NURNOVA 15M REPORT",
         "",
         f"Epoch: {ACTIVE_EPOCH_ID}",
-        f"Active setup: {payload['active_setup']}",
-        f"Primary TF: {payload['primary_tf']}",
-        f"Context TF: {payload['context_tf']}",
-        f"Open trades: {payload['open_trades']}",
-        f"Closed trades: {payload['closed_trades']}",
-        f"Wins: {payload['wins']}",
-        f"Losses: {payload['losses']}",
+        f"Pair: {payload['pair']}",
+        "",
+        "Research Status:",
+        f"Open Trades: {payload['open_trades']}",
+        f"Closed Trades: {payload['closed_trades']}",
+        f"TP Hits: {payload['tp_hits']}",
+        f"SL Hits: {payload['sl_hits']}",
         f"Expired: {payload['expired']}",
         f"Winrate: {_format_percent(payload['winrate'])}",
         f"Average R: {_format_number(payload['average_r'])}",
-        f"Edge status: {payload['edge_status']}",
-        f"Best model: {payload['best_model']}",
-        f"Sample count: {payload['sample_count']}",
+        f"Edge Status: {payload['edge_status']}",
+        "",
+        f"Best Model: {payload['best_model']}",
+        f"Best Model Winrate: {_format_percent(payload['best_model_winrate'])}",
+        f"Best Model Avg R: {_format_number(payload['best_model_avg_r'])}",
+        f"Best Model Sample Count: {payload['sample_count']}",
+        "",
+        f"Current Active Setup: {latest_event.get('primary_setup') or payload['active_setup']}",
+        f"Primary TF: {payload['primary_tf']}",
+        f"Context TF: {payload['context_tf']}",
+        "",
+        "System:",
+        "Pipeline: EPOCH_V2",
+        "Sync: EPOCH_V2_SSOT",
         "Live Trade OFF",
+        "",
+        "Source:",
+        "All metrics from EPOCH_V2_SSOT.",
     ]
     return "\n".join(lines), payload
 
@@ -202,48 +260,50 @@ def run_reporter(mode: str) -> dict[str, Any]:
     lifecycle = load_json(LIFECYCLE_PATH) or {}
     accounting = load_json(ACCOUNTING_PATH) or {}
     edge = load_json(EDGE_PATH) or {}
+    event_payload = load_json(EVENT_PATH) or {}
+    grade = load_json(GRADE_PATH) or {}
+    contract = load_json(CONTRACT_PATH) or {}
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     reported = _load_reported_state()
     messages: list[dict[str, Any]] = []
     dedup_suppressed = 0
+    rate_limit_status = "NOT_APPLICABLE"
 
     if mode == "instant":
-        for trade in lifecycle.get("open_trades") or []:
-            trade_id = str(trade.get("paper_trade_id") or "")
-            if not trade_id or trade_id in reported["reported_open_trade_ids"]:
+        for event in event_payload.get("events") or ([event_payload.get("latest_event")] if event_payload.get("latest_event") else []):
+            event_id = str(event.get("event_id") or "")
+            if (
+                not event_id
+                or event_id in reported["reported_event_ids"]
+                or event.get("signal_grade") != "A_PLUS"
+                or event.get("a_plus_ready") is not True
+            ):
+                if event_id in reported["reported_event_ids"]:
+                    dedup_suppressed += 1
                 continue
-            text = _instant_signal_message(trade)
-            digest = _hash_payload({"open": trade_id, "text": text})
-            if digest in reported["reported_open_hashes"]:
-                dedup_suppressed += 1
-                continue
-            messages.append({"message_type": "OPEN_SIGNAL", "paper_trade_id": trade_id, "status": "OPEN", "message_text": text, "message_hash": digest})
-            reported["reported_open_trade_ids"].add(trade_id)
-            reported["reported_open_hashes"].add(digest)
-
-        for trade in lifecycle.get("trades_closed_this_loop") or []:
-            trade_id = str(trade.get("paper_trade_id") or "")
-            status = str(trade.get("close_reason") or trade.get("status") or "").upper()
-            if not trade_id or trade_id in reported["reported_closed_trade_ids"] or status not in CLOSED_STATUSES:
-                continue
-            text = _result_message(trade, accounting)
-            digest = _hash_payload({"closed": trade_id, "text": text})
-            if digest in reported["reported_closed_hashes"]:
-                dedup_suppressed += 1
-                continue
-            messages.append({"message_type": "TRADE_RESULT", "paper_trade_id": trade_id, "status": status, "message_text": text, "message_hash": digest})
-            reported["reported_closed_trade_ids"].add(trade_id)
-            reported["reported_closed_hashes"].add(digest)
+            text = _instant_signal_message(event, edge)
+            digest = _hash_payload({"event": event_id, "text": text})
+            messages.append({"message_type": "NURNOVA_A_PLUS_SIGNAL", "event_id": event_id, "status": "A_PLUS_READY", "message_text": text, "message_hash": digest})
+            reported["reported_event_ids"].add(event_id)
     else:
-        text, summary_payload = _summary_message(factory, lifecycle, accounting, edge)
-        digest = _hash_payload(summary_payload)
-        if digest != _load_summary_hash():
-            _write_summary_hash(digest, text)
-            messages.append({"message_type": "SUMMARY", "paper_trade_id": None, "status": "SUMMARY_READY", "message_text": text, "message_hash": digest})
-        else:
+        allowed, rate_limit_status, elapsed = _summary_rate_limit_status()
+        if not allowed:
+            messages = []
             dedup_suppressed = 1
+        else:
+            text, summary_payload = _summary_message(factory, lifecycle, accounting, edge, event_payload)
+            digest = _hash_payload(summary_payload)
+            if digest != _load_summary_hash():
+                _write_summary_hash(digest, text)
+                messages.append({"message_type": "NURNOVA_15M_REPORT", "paper_trade_id": None, "event_id": None, "status": "SUMMARY_READY", "message_text": text, "message_hash": digest})
+            else:
+                dedup_suppressed = 1
+            if messages:
+                _write_summary_sent_status("SUMMARY_READY")
+        if not messages and rate_limit_status == "SUPPRESSED_15M_RATE_LIMIT":
+            _write_summary_sent_status(rate_limit_status)
 
     status = "NO_MESSAGES"
     if not token or not chat_id:
@@ -269,15 +329,26 @@ def run_reporter(mode: str) -> dict[str, Any]:
             "block_id": BLOCK_ID,
             "report_mode": mode.upper(),
             "source": {"source_mode": "EPOCH_V2_SSOT"},
-            "status": status if messages else ("SUPPRESSED_DUPLICATE" if dedup_suppressed else "NO_MESSAGES"),
-            "summary": (_summary_message(factory, lifecycle, accounting, edge)[1] if mode == "summary" else None),
+            "source_state_refs": {
+                "signal_data_contract": str(CONTRACT_PATH),
+                "signal_event": str(EVENT_PATH),
+                "signal_grade": str(GRADE_PATH),
+                "paper_trade_factory": str(FACTORY_PATH),
+                "research_paper_lifecycle": str(LIFECYCLE_PATH),
+                "outcome_accounting": str(ACCOUNTING_PATH),
+                "research_edge_matrix": str(EDGE_PATH),
+            },
+            "status": rate_limit_status if mode == "summary" and rate_limit_status == "SUPPRESSED_15M_RATE_LIMIT" else status if messages else ("SUPPRESSED_DUPLICATE" if dedup_suppressed else "NO_MESSAGES"),
+            "summary": (_summary_message(factory, lifecycle, accounting, edge, event_payload)[1] if mode == "summary" else None),
             "message_count": len(messages),
             "dedup_suppressed_count": dedup_suppressed,
+            "rate_limit_status": rate_limit_status,
             "telegram_configured": bool(token and chat_id),
             "messages": [
                 {
                     "message_type": item.get("message_type"),
                     "paper_trade_id": item.get("paper_trade_id"),
+                    "event_id": item.get("event_id"),
                     "status": item.get("status"),
                     "telegram_status": item.get("telegram_status"),
                 }
@@ -291,6 +362,9 @@ def run_reporter(mode: str) -> dict[str, Any]:
                         "epoch_v2/latest_research_paper_lifecycle.json": lifecycle,
                         "epoch_v2/latest_outcome_accounting.json": accounting,
                         "epoch_v2/latest_research_edge_matrix.json": edge,
+                        "epoch_v2/latest_signal_event.json": event_payload,
+                        "epoch_v2/latest_signal_grade.json": grade,
+                        "epoch_v2/latest_signal_data_contract.json": contract,
                     }.items() if not payload
                 ],
             },
@@ -320,6 +394,10 @@ def run_reporter(mode: str) -> dict[str, Any]:
 
 def run_summary_report() -> dict[str, Any]:
     return run_reporter("summary")
+
+
+def run_instant_report() -> dict[str, Any]:
+    return run_reporter("instant")
 
 
 def main() -> None:

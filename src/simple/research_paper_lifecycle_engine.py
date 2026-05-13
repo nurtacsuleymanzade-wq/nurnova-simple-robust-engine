@@ -25,7 +25,7 @@ STATE_DIR = Path("state/simple")
 OBSERVATION_PATH = STATE_DIR / "latest_observation_factory.json"
 DNA_PATH = STATE_DIR / "latest_mtf_candle_dna.json"
 MAX_HISTORY_ROWS = 5000
-MAX_OPEN_TRADES = 50
+MAX_OPEN_TRADES = 12
 
 
 def _current_price(observation: dict[str, Any], dna: dict[str, Any]) -> float | None:
@@ -85,6 +85,16 @@ def _compact_trade(trade: dict[str, Any]) -> dict[str, Any]:
         "invalid_reason_codes",
         "cause_chain",
         "source_state_refs",
+        "event_id",
+        "event_bucket_5m",
+        "event_confluence_count",
+        "signal_grade",
+        "grade_score",
+        "grade_reasons",
+        "grade_blockers",
+        "a_plus_ready",
+        "supporting_models",
+        "supporting_setups",
     )
     compact = {field: trade.get(field) for field in keep if field in trade}
     compact["execution_safety"] = {"live_order_sent": False, "private_api_used": False}
@@ -94,9 +104,9 @@ def _compact_trade(trade: dict[str, Any]) -> dict[str, Any]:
 def _collect_factory_trades() -> dict[str, dict[str, Any]]:
     trades: dict[str, dict[str, Any]] = {}
     for payload in read_jsonl_tail_objects(FACTORY_HISTORY_PATH, max_lines=MAX_HISTORY_ROWS):
-        for trade in payload.get("newest_opened_this_loop") or payload.get("top_candidate_diagnostics") or []:
+        for trade in payload.get("newest_opened_this_loop") or []:
             trade_id = str(trade.get("paper_trade_id") or "")
-            if trade_id:
+            if trade_id and str(trade.get("status") or "").upper() == "OPEN" and trade.get("valid_for_lifecycle") is not False:
                 trades[trade_id] = dict(trade)
     return trades
 
@@ -144,7 +154,14 @@ def _close_trade(trade: dict[str, Any], current_price: float | None, now_ts: str
         existing_invalid_reasons = str(updated.get("invalid_reason") or "").split("|") if updated.get("invalid_reason") else []
         updated["invalid_reason"] = "|".join(sorted(set([*existing_invalid_reasons, *invalid_reasons])))
 
-    if current_price is None or entry is None or risk_distance is None or risk_distance <= 0:
+    if current_price is None:
+        updated["status"] = "OPEN"
+        updated["outcome_status"] = "OPEN"
+        updated["lifecycle_wait_reason"] = "PRICE_MISSING"
+        updated["reason_codes"] = sorted(set([*(updated.get("reason_codes") or []), "PRICE_MISSING"]))
+        return updated
+
+    if entry is None or risk_distance is None or risk_distance <= 0:
         updated["status"] = "INVALID"
         updated["close_reason"] = "INVALID"
         updated["outcome_status"] = "INVALID"
@@ -179,7 +196,9 @@ def _close_trade(trade: dict[str, Any], current_price: float | None, now_ts: str
         elif stop_loss is not None and current_price >= stop_loss:
             close_reason, exit_price = "SL_HIT", stop_loss
 
-    if close_reason is None and updated["hold_seconds"] >= int(updated.get("max_holding_seconds") or 1800):
+    expected_hold_max_minutes = int(updated.get("expected_hold_max_minutes") or 0)
+    expiry_seconds = expected_hold_max_minutes * 60 if expected_hold_max_minutes > 0 else int(updated.get("max_holding_seconds") or 1800)
+    if close_reason is None and updated["hold_seconds"] > expiry_seconds:
         close_reason, exit_price = "EXPIRED", current_price
 
     if close_reason is None:
@@ -191,10 +210,12 @@ def _close_trade(trade: dict[str, Any], current_price: float | None, now_ts: str
     updated["exit_price"] = exit_price
     updated["outcome_status"] = "CLOSED"
     updated["r_result"] = round(((exit_price - entry) / risk_distance) if direction == "LONG" else ((entry - exit_price) / risk_distance), 8)
+    updated["valid_for_edge"] = True
     if "MISSING_TIMEFRAME_OR_RR" in invalid_reasons:
         updated["status"] = "INVALID"
         updated["close_reason"] = "INVALID"
         updated["outcome_status"] = "INVALID"
+        updated["valid_for_edge"] = False
     return updated
 
 
@@ -212,10 +233,16 @@ def run_research_paper_lifecycle_engine() -> dict[str, Any]:
     factory_trades = _collect_factory_trades()
     open_map, closed_map = _collect_lifecycle_history()
 
+    existing_event_ids = {str(trade.get("event_id") or "") for trade in [*open_map.values(), *closed_map.values()] if trade.get("event_id")}
     for trade_id, trade in factory_trades.items():
         if trade_id in closed_map or trade_id in open_map:
             continue
+        event_id = str(trade.get("event_id") or "")
+        if event_id and event_id in existing_event_ids:
+            continue
         open_map[trade_id] = dict(trade)
+        if event_id:
+            existing_event_ids.add(event_id)
 
     next_open: dict[str, dict[str, Any]] = {}
     closed_this_loop: dict[str, dict[str, Any]] = {}
@@ -268,6 +295,11 @@ def run_research_paper_lifecycle_engine() -> dict[str, Any]:
             "recent_closed": recent_closed,
             "recent_invalid": recent_invalid,
             "trades_closed_this_loop": [_compact_trade(item) for item in list(closed_this_loop.values()) + list(invalid_this_loop.values())],
+            "closed_this_loop": [_compact_trade(item) for item in closed_this_loop.values()],
+            "closed_total": len(recent_closed),
+            "tp_hit_count": tp,
+            "sl_hit_count": sl,
+            "expired_count": expired,
             "summary": {
                 "opened": len(factory_trades),
                 "open": len(open_trades),
@@ -276,6 +308,12 @@ def run_research_paper_lifecycle_engine() -> dict[str, Any]:
                 "tp": tp,
                 "sl": sl,
                 "expired": expired,
+                "open_trades": len(open_trades),
+                "closed_this_loop": len(closed_this_loop),
+                "closed_total": len(recent_closed),
+                "tp_hit_count": tp,
+                "sl_hit_count": sl,
+                "expired_count": expired,
             },
             "quality_counters": {
                 "duplicate_paper_trade_id_count": duplicate_closed_ids,
