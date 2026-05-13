@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.simple.model_condition_library import evaluate_condition
+from src.simple.model_condition_library import evaluate_condition, run_condition_semantic_selftest
 
 BLOCK_ID = "MODEL_HUNTER_ENGINE"
 STATE_DIR = Path("state/simple")
@@ -146,6 +146,8 @@ def run_model_hunter_engine() -> dict[str, Any]:
     state = _build_state_bundle()
     symbol = str((state.get("observation") or {}).get("symbol") or "BTCUSDT")
     missing_inputs = [name for name, payload in state.items() if not payload]
+    semantic_selftest = run_condition_semantic_selftest()
+    semantic_health = str(semantic_selftest.get("semantic_health") or "FAILED")
 
     detected_models: list[dict[str, Any]] = []
     no_trade_models: list[dict[str, Any]] = []
@@ -238,7 +240,11 @@ def run_model_hunter_engine() -> dict[str, Any]:
             "top_model_id": top_model.get("model_id") if top_model else None,
             "top_model_quality": top_model.get("quality") if top_model else None,
             "top_model_score": top_model.get("match_score") if top_model else None,
+            "semantic_health": semantic_health,
+            "semantic_failed_tests": list(semantic_selftest.get("failed_tests") or []),
         },
+        "semantic_health": semantic_health,
+        "semantic_selftest": semantic_selftest,
         "reason_codes": [
             f"DETECTED_{len(detected_models)}",
             f"NO_TRADE_{len(no_trade_models)}",
@@ -249,10 +255,13 @@ def run_model_hunter_engine() -> dict[str, Any]:
             "PAPER_ONLY_RESEARCH",
         ],
         "data_quality": {
-            "level": "HIGH" if models else "LOW",
+            "level": "HIGH" if models and semantic_health == "PASS" else "LOW" if not models else "MEDIUM",
             "missing_inputs": missing_inputs + ([] if models else ["latest_model_definitions"]),
         },
         "feeds_next": [
+            "MODEL_SEMANTIC_VALIDATOR",
+            "MODEL_CLUSTER_ENGINE",
+            "MODEL_COOLDOWN_ENGINE",
             "PAPER_TRADE_FACTORY",
             "RESEARCH_PAPER_LIFECYCLE_ENGINE",
             "RESEARCH_EDGE_MATRIX_ENGINE",
@@ -264,6 +273,8 @@ def run_model_hunter_engine() -> dict[str, Any]:
             "live_order_sent": False,
         },
     }
+    if semantic_health != "PASS":
+        output["reason_codes"].append("CONDITION_LIBRARY_SEMANTIC_HEALTH_FAILED")
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT_PATH.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")

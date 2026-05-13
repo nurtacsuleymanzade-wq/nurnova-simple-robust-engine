@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
 
@@ -163,6 +164,37 @@ def _structure_label_or_trend(state: dict[str, Any], tf: str) -> tuple[str, str]
     return str(payload.get("structure_label", "UNKNOWN")), str(payload.get("trend_state", "UNKNOWN"))
 
 
+def _bool_result(condition_id: str, result: dict[str, Any]) -> bool:
+    return result.get("matched") is True or result.get("status") == "MATCHED"
+
+
+def _string_tokens(*values: Any) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        text = str(value or "").upper()
+        if not text:
+            continue
+        tokens.add(text)
+        tokens.update(part for part in text.replace("-", "_").split("_") if part)
+    return tokens
+
+
+def _structure_bias_from_label(label: str) -> str:
+    tokens = _string_tokens(label)
+    if {"EQH", "EQL", "RANGE"} & tokens:
+        return "RANGE"
+    if "BOS" in tokens:
+        if "BULLISH" in tokens or "UP" in tokens:
+            return "BULLISH"
+        if "BEARISH" in tokens or "DOWN" in tokens:
+            return "BEARISH"
+    if "HH" in tokens or "HL" in tokens:
+        return "BULLISH"
+    if "LH" in tokens or "LL" in tokens:
+        return "BEARISH"
+    return "UNKNOWN"
+
+
 def _logic_flow_attack(state: dict[str, Any], side: str) -> dict[str, Any]:
     cond = f"COND_{side}_ATTACKING"
     observation = _observation(state)
@@ -170,16 +202,31 @@ def _logic_flow_attack(state: dict[str, Any], side: str) -> dict[str, Any]:
     war_side = str(_get(observation, "war_reading", "who_attacked") or "UNKNOWN")
     dominant = str(_get(dna, "war_summary", "dominant_side") or "UNKNOWN")
     delta = _safe_float(_get(observation, "volume_flow", "delta"))
-    delta_match = delta is not None and ((side == "BUYERS" and delta > 0) or (side == "SELLERS" and delta < 0))
-    matched = war_side == side or dominant == side or delta_match
-    evidence: list[str] = []
-    if war_side == side:
-        evidence.append(f"war_reading.who_attacked={side}")
-    if dominant == side:
-        evidence.append(f"dna.1m.war_summary.dominant_side={side}")
-    if delta_match:
-        evidence.append(f"observation.volume_flow.delta={delta}")
-    return _result(cond, matched, evidence, [], "observation/dna")
+    evidence = ["source_priority=war_reading>volume_flow.delta>dna.1m.war_summary.dominant_side"]
+    reason_codes: list[str] = []
+    delta_side = "BUYERS" if delta is not None and delta > 0 else "SELLERS" if delta is not None and delta < 0 else "NEUTRAL"
+    strongest_side = "UNKNOWN"
+    strongest_source = "dna.1m.war_summary.dominant_side"
+
+    if war_side not in ("UNKNOWN", "NONE", "NEUTRAL", "BALANCED"):
+        strongest_side = war_side
+        strongest_source = "war_reading.who_attacked"
+    elif delta_side in ("BUYERS", "SELLERS"):
+        strongest_side = delta_side
+        strongest_source = "observation.volume_flow.delta"
+    elif dominant not in ("UNKNOWN", "NONE", "NEUTRAL", "BALANCED"):
+        strongest_side = dominant
+
+    strongest_value = war_side if strongest_source == "war_reading.who_attacked" else delta if strongest_source == "observation.volume_flow.delta" else dominant
+    evidence.append(f"{strongest_source}={strongest_value}")
+    evidence.append(f"observation.volume_flow.delta={delta}")
+    evidence.append(f"dna.1m.war_summary.dominant_side={dominant}")
+
+    aligned_sides = {candidate for candidate in (war_side, delta_side, dominant) if candidate in ("BUYERS", "SELLERS")}
+    if strongest_side in ("BUYERS", "SELLERS") and any(candidate != strongest_side for candidate in aligned_sides):
+        reason_codes.append("SOURCE_CONFLICT")
+
+    return _result(cond, strongest_side == side, evidence, reason_codes, "observation/dna")
 
 
 def _logic_flow_defend(state: dict[str, Any], side: str) -> dict[str, Any]:
@@ -223,11 +270,32 @@ def _delta_condition(state: dict[str, Any], positive: bool) -> dict[str, Any]:
     cond = "COND_POSITIVE_DELTA" if positive else "COND_NEGATIVE_DELTA"
     obs_delta = _safe_float(_get(_observation(state), "volume_flow", "delta"))
     dna_delta = _safe_float(_dna(state, "1m").get("delta"))
-    values = [value for value in (obs_delta, dna_delta) if value is not None]
-    if not values:
+    if obs_delta is None and dna_delta is None:
         return _missing(cond, "observation/dna", "DELTA_NOT_AVAILABLE")
-    matched = any(value > 0 for value in values) if positive else any(value < 0 for value in values)
-    return _result(cond, matched, [f"delta_values={values}"], [], "observation/dna")
+    reason_codes: list[str] = []
+    evidence = [f"observation.volume_flow.delta={obs_delta}", f"dna.1m.delta={dna_delta}"]
+    if positive:
+        if obs_delta is not None:
+            matched = obs_delta > 0
+            evidence.append("source=observation.volume_flow.delta")
+            if obs_delta < 0 and dna_delta is not None and dna_delta > 0:
+                reason_codes.append("CURRENT_OBSERVATION_NEGATIVE")
+            elif obs_delta > 0 and dna_delta is not None and dna_delta < 0:
+                reason_codes.append("SOURCE_CONFLICT")
+            return _result(cond, matched, evidence, reason_codes, "observation/dna")
+        evidence.append("source=dna.1m.delta")
+        return _result(cond, dna_delta is not None and dna_delta > 0, evidence, reason_codes, "observation/dna")
+
+    if obs_delta is not None:
+        matched = obs_delta < 0
+        evidence.append("source=observation.volume_flow.delta")
+        if obs_delta > 0 and dna_delta is not None and dna_delta < 0:
+            reason_codes.append("CURRENT_OBSERVATION_POSITIVE")
+        elif obs_delta < 0 and dna_delta is not None and dna_delta > 0:
+            reason_codes.append("SOURCE_CONFLICT")
+        return _result(cond, matched, evidence, reason_codes, "observation/dna")
+    evidence.append("source=dna.1m.delta")
+    return _result(cond, dna_delta is not None and dna_delta < 0, evidence, reason_codes, "observation/dna")
 
 
 def cond_positive_delta(state: dict[str, Any]) -> dict[str, Any]:
@@ -243,14 +311,36 @@ def _divergence(state: dict[str, Any], bullish: bool) -> dict[str, Any]:
     obs_delta = _safe_float(_get(_observation(state), "volume_flow", "delta"))
     candle_truth = str(_get(_dna(state, "1m"), "war_summary", "candle_truth") or "UNKNOWN")
     defended = evaluate_condition("COND_BUYERS_DEFENDING" if bullish else "COND_SELLERS_DEFENDING", state)
-    failed = bool(_get(_observation(state), "war_reading", "price_failed_to_advance"))
+    failed_up = bool(_get(_observation(state), "war_reading", "price_failed_to_advance"))
+    fake_condition = evaluate_condition("COND_FAKE_BEARISH" if bullish else "COND_FAKE_BULLISH", state)
+    real_condition = evaluate_condition("COND_REAL_BEARISH" if bullish else "COND_REAL_BULLISH", state)
     if obs_delta is None and candle_truth == "UNKNOWN":
         return _missing(cond, "observation/dna", "DELTA_AND_CANDLE_TRUTH_MISSING")
+    evidence = [
+        f"observation.volume_flow.delta={obs_delta}",
+        f"candle_truth={candle_truth}",
+        f"defense={defended['status']}",
+        f"fake_signal={fake_condition['status']}",
+        f"price_failed_to_advance={failed_up}",
+    ]
+    if _bool_result(cond, real_condition):
+        contradiction = "REAL_BEARISH_CONTINUATION_PRESENT" if bullish else "REAL_BULLISH_CONTINUATION_PRESENT"
+        return _result(cond, False, evidence, [contradiction], "observation/dna/interpretation")
     if bullish:
-        matched = (obs_delta is not None and obs_delta < 0 and candle_truth not in ("REAL_BEARISH", "WEAK_BEARISH")) or (failed and defended["matched"] is True)
+        matched = (
+            obs_delta is not None
+            and obs_delta < 0
+            and (_bool_result(cond, defended) or _bool_result(cond, fake_condition))
+            and candle_truth not in ("REAL_BEARISH", "WEAK_BEARISH")
+        )
     else:
-        matched = (obs_delta is not None and obs_delta > 0 and candle_truth not in ("REAL_BULLISH", "WEAK_BULLISH")) or (failed and defended["matched"] is True)
-    evidence = [f"delta={obs_delta}", f"candle_truth={candle_truth}", f"defense={defended['status']}"]
+        matched = (
+            obs_delta is not None
+            and obs_delta > 0
+            and (failed_up or _bool_result(cond, defended) or _bool_result(cond, fake_condition))
+            and (_bool_result(cond, defended) or _bool_result(cond, fake_condition))
+            and candle_truth not in ("REAL_BULLISH", "WEAK_BULLISH")
+        )
     return _result(cond, matched, evidence, [], "observation/dna/interpretation")
 
 
@@ -317,20 +407,83 @@ def _fake_real_bull_bear(state: dict[str, Any], fake: bool, bullish: bool) -> di
     )
     candle_truth = str(_get(_dna(state, "1m"), "war_summary", "candle_truth") or "UNKNOWN")
     category = _candle_category(state, "1m")
-    trapped_buyers = evaluate_condition("COND_TRAPPED_BUYERS", state)["matched"] is True
-    trapped_sellers = evaluate_condition("COND_TRAPPED_SELLERS", state)["matched"] is True
-    positive_delta = evaluate_condition("COND_POSITIVE_DELTA", state)["matched"] is True
-    negative_delta = evaluate_condition("COND_NEGATIVE_DELTA", state)["matched"] is True
-    matched = False
+    trapped_buyers = _bool_result("COND_TRAPPED_BUYERS", evaluate_condition("COND_TRAPPED_BUYERS", state))
+    trapped_sellers = _bool_result("COND_TRAPPED_SELLERS", evaluate_condition("COND_TRAPPED_SELLERS", state))
+    positive_delta = _bool_result("COND_POSITIVE_DELTA", evaluate_condition("COND_POSITIVE_DELTA", state))
+    negative_delta = _bool_result("COND_NEGATIVE_DELTA", evaluate_condition("COND_NEGATIVE_DELTA", state))
+    buyers_attacking = _bool_result("COND_BUYERS_ATTACKING", evaluate_condition("COND_BUYERS_ATTACKING", state))
+    sellers_attacking = _bool_result("COND_SELLERS_ATTACKING", evaluate_condition("COND_SELLERS_ATTACKING", state))
+    buyers_defending = _bool_result("COND_BUYERS_DEFENDING", evaluate_condition("COND_BUYERS_DEFENDING", state))
+    sellers_defending = _bool_result("COND_SELLERS_DEFENDING", evaluate_condition("COND_SELLERS_DEFENDING", state))
+    structure_bullish = _bool_result("COND_STRUCTURE_BULLISH", evaluate_condition("COND_STRUCTURE_BULLISH", state))
+    structure_bearish = _bool_result("COND_STRUCTURE_BEARISH", evaluate_condition("COND_STRUCTURE_BEARISH", state))
+    failed_up = bool(_get(_observation(state), "war_reading", "price_failed_to_advance"))
+    evidence = [f"candle_truth={candle_truth}", f"category={category}", f"price_failed_to_advance={failed_up}"]
+    reason_codes: list[str] = []
+
+    if not fake and bullish and candle_truth == "REAL_BEARISH":
+        return _result(name, False, evidence, ["REAL_BEARISH_CONTRADICTS_REAL_BULLISH"], "dna/intent")
+    if not fake and not bullish and candle_truth == "REAL_BULLISH":
+        return _result(name, False, evidence, ["REAL_BULLISH_CONTRADICTS_REAL_BEARISH"], "dna/intent")
+
     if fake and bullish:
-        matched = candle_truth == "FAKE_BULLISH" or (category == "TRAP_CANDLE" and trapped_buyers)
+        matched = (
+            candle_truth == "FAKE_BULLISH"
+            or (category == "TRAP_CANDLE" and buyers_attacking and (trapped_buyers or sellers_defending or failed_up))
+            or (positive_delta and failed_up and sellers_defending)
+        )
+        if candle_truth == "REAL_BEARISH":
+            matched = False
+            reason_codes.append("REAL_BEARISH_CONTRADICTS_FAKE_BULLISH")
     elif fake and not bullish:
-        matched = candle_truth == "FAKE_BEARISH" or (category == "TRAP_CANDLE" and trapped_sellers)
+        matched = (
+            candle_truth == "FAKE_BEARISH"
+            or (category == "TRAP_CANDLE" and sellers_attacking and (trapped_sellers or buyers_defending))
+            or (negative_delta and (buyers_defending or trapped_sellers))
+        )
+        if candle_truth == "REAL_BULLISH":
+            matched = False
+            reason_codes.append("REAL_BULLISH_CONTRADICTS_FAKE_BEARISH")
     elif bullish:
-        matched = candle_truth == "REAL_BULLISH" or (category == "CONTINUATION_CANDLE" and positive_delta)
+        strong_continuation = (
+            candle_truth not in ("FAKE_BULLISH", "REAL_BEARISH")
+            and positive_delta
+            and buyers_attacking
+            and structure_bullish
+            and not failed_up
+        )
+        matched = candle_truth == "REAL_BULLISH" or strong_continuation
+        if not matched:
+            reason_codes.append("REAL_BULLISH_EVIDENCE_NOT_PRESENT")
     else:
-        matched = candle_truth == "REAL_BEARISH" or (category == "CONTINUATION_CANDLE" and negative_delta)
-    return _result(name, matched, [f"candle_truth={candle_truth}", f"category={category}"], [], "dna/intent")
+        strong_continuation = (
+            candle_truth not in ("FAKE_BEARISH", "REAL_BULLISH")
+            and negative_delta
+            and sellers_attacking
+            and structure_bearish
+            and (failed_up or not buyers_defending)
+        )
+        matched = candle_truth == "REAL_BEARISH" or strong_continuation
+        if not matched:
+            reason_codes.append("REAL_BEARISH_EVIDENCE_NOT_PRESENT")
+
+    if fake and matched and category == "TRAP_CANDLE":
+        evidence.append("trap_failure_confirmed=True")
+    if not fake and matched and candle_truth not in ("REAL_BULLISH", "REAL_BEARISH"):
+        evidence.append("continuation_evidence=STRONG")
+    evidence.extend([
+        f"buyers_attacking={buyers_attacking}",
+        f"sellers_attacking={sellers_attacking}",
+        f"buyers_defending={buyers_defending}",
+        f"sellers_defending={sellers_defending}",
+        f"positive_delta={positive_delta}",
+        f"negative_delta={negative_delta}",
+        f"trapped_buyers={trapped_buyers}",
+        f"trapped_sellers={trapped_sellers}",
+        f"structure_bullish={structure_bullish}",
+        f"structure_bearish={structure_bearish}",
+    ])
+    return _result(name, matched, evidence, reason_codes, "dna/intent")
 
 
 def cond_fake_bullish(state: dict[str, Any]) -> dict[str, Any]:
@@ -353,14 +506,20 @@ def _structure_condition(state: dict[str, Any], bullish: bool) -> dict[str, Any]
     cond = "COND_STRUCTURE_BULLISH" if bullish else "COND_STRUCTURE_BEARISH"
     labels = []
     trends = []
+    biases = []
+    reason_codes: list[str] = []
     for tf in ("1m", "5m"):
         label, trend = _structure_label_or_trend(state, tf)
-        labels.append(label)
-        trends.append(trend)
-    bullish_labels = {"HH", "HL", "BOS"}
-    bearish_labels = {"LH", "LL", "BOS"}
-    matched = any(label in (bullish_labels if bullish else bearish_labels) for label in labels) or any(trend == ("UPTREND" if bullish else "DOWNTREND") for trend in trends)
-    return _result(cond, matched, [f"labels={labels}", f"trends={trends}"], [], "structure")
+        labels.append(str(label).upper())
+        trends.append(str(trend).upper())
+        biases.append(_structure_bias_from_label(label))
+    range_labels = {"EQH", "EQL", "RANGE"}
+    explicit_trend = "UPTREND" if bullish else "DOWNTREND"
+    explicit_bias = "BULLISH" if bullish else "BEARISH"
+    matched = any(bias == explicit_bias for bias in biases) or any(trend == explicit_trend for trend in trends)
+    if not matched and any(label in range_labels for label in labels):
+        reason_codes.append("RANGE_NOT_BULLISH_STRUCTURE" if bullish else "RANGE_NOT_BEARISH_STRUCTURE")
+    return _result(cond, matched, [f"labels={labels}", f"trends={trends}", f"biases={biases}"], reason_codes, "structure")
 
 
 def cond_structure_bullish(state: dict[str, Any]) -> dict[str, Any]:
@@ -475,7 +634,10 @@ def _regime_condition(state: dict[str, Any], expected: str) -> dict[str, Any]:
     regime = str(_regime(state).get("regime", "UNKNOWN"))
     if regime == "UNKNOWN":
         return _missing(cond, "regime", "REGIME_MISSING")
-    return _result(cond, regime == expected, [f"regime={regime}"], [], "regime")
+    reason_codes: list[str] = []
+    if expected == "MOMENTUM_MODE" and regime in {"TRANSITION_MODE", "BALANCE_MODE"}:
+        reason_codes.append("REGIME_NOT_MOMENTUM_MODE")
+    return _result(cond, regime == expected, [f"regime={regime}"], reason_codes, "regime")
 
 
 def cond_regime_momentum(state: dict[str, Any]) -> dict[str, Any]:
@@ -712,3 +874,71 @@ def evaluate_condition_group(condition_ids: list[str], state: dict[str, Any]) ->
         "unknown_conditions": unknown,
         "not_matched_conditions": not_matched,
     }
+
+
+def run_condition_semantic_selftest() -> dict[str, Any]:
+    range_structure = {
+        "1m": {"structure_label": "EQH", "trend_state": "RANGE"},
+        "5m": {"structure_label": "RANGE", "trend_state": "RANGE"},
+    }
+    bullish_state = {
+        "observation": {"war_reading": {"who_attacked": "BUYERS", "who_defended": "SELLERS", "price_failed_to_advance": False}, "volume_flow": {"delta": 1.0}},
+        "dna": {"1m": {"war_summary": {"candle_truth": "REAL_BULLISH", "dominant_side": "BUYERS"}, "candle_category": {"primary": "CONTINUATION_CANDLE"}, "delta": 1.0}},
+        "structure": {"1m": {"structure_label": "HH", "trend_state": "UPTREND"}, "5m": {"structure_label": "HL", "trend_state": "UPTREND"}},
+        "regime": {"regime": "MOMENTUM_MODE"},
+    }
+    bearish_state = {
+        "observation": {"war_reading": {"who_attacked": "SELLERS", "who_defended": "BUYERS", "price_failed_to_advance": False}, "volume_flow": {"delta": -1.0}},
+        "dna": {"1m": {"war_summary": {"candle_truth": "REAL_BEARISH", "dominant_side": "SELLERS"}, "candle_category": {"primary": "CONTINUATION_CANDLE"}, "delta": -1.0}},
+        "structure": {"1m": {"structure_label": "LL", "trend_state": "DOWNTREND"}, "5m": {"structure_label": "LH", "trend_state": "DOWNTREND"}},
+        "regime": {"regime": "MOMENTUM_MODE"},
+    }
+    range_state = {
+        "observation": {"war_reading": {"who_attacked": "UNKNOWN", "who_defended": "UNKNOWN", "price_failed_to_advance": False}, "volume_flow": {"delta": 0.0}},
+        "dna": {"1m": {"war_summary": {"candle_truth": "BALANCED", "dominant_side": "BALANCED"}, "candle_category": {"primary": "UNKNOWN"}, "delta": 0.0}},
+        "structure": range_structure,
+        "regime": {"regime": "TRANSITION_MODE"},
+    }
+    fake_bullish_fail_state = {
+        "observation": {"war_reading": {"who_attacked": "BUYERS", "who_defended": "SELLERS", "price_failed_to_advance": True}, "volume_flow": {"delta": 1.0}},
+        "dna": {"1m": {"war_summary": {"candle_truth": "FAKE_BULLISH", "dominant_side": "BUYERS"}, "candle_category": {"primary": "TRAP_CANDLE"}, "delta": 1.0}},
+        "structure": range_structure,
+        "intent": {"intent_analysis": {"trapped_side": "BUYERS"}},
+        "positioning": {"ltf_confirmation": {"trap_context": "BUYERS_TRAPPED"}},
+    }
+    fake_bearish_fail_state = {
+        "observation": {"war_reading": {"who_attacked": "SELLERS", "who_defended": "BUYERS", "price_failed_to_advance": False}, "volume_flow": {"delta": -1.0}},
+        "dna": {"1m": {"war_summary": {"candle_truth": "FAKE_BEARISH", "dominant_side": "SELLERS"}, "candle_category": {"primary": "TRAP_CANDLE"}, "delta": -1.0}},
+        "structure": range_structure,
+        "intent": {"intent_analysis": {"trapped_side": "SELLERS"}},
+        "positioning": {"ltf_confirmation": {"trap_context": "SELLERS_TRAPPED"}},
+    }
+
+    checks = {
+        "REAL_BULLISH_DOES_NOT_MATCH_REAL_BEARISH": evaluate_condition("COND_REAL_BULLISH", bearish_state).get("status") != "MATCHED",
+        "REAL_BEARISH_DOES_NOT_MATCH_REAL_BULLISH": evaluate_condition("COND_REAL_BEARISH", bullish_state).get("status") != "MATCHED",
+        "STRUCTURE_BULLISH_DOES_NOT_MATCH_RANGE_EQH": evaluate_condition("COND_STRUCTURE_BULLISH", range_state).get("status") != "MATCHED",
+        "STRUCTURE_BEARISH_DOES_NOT_MATCH_RANGE_EQH": evaluate_condition("COND_STRUCTURE_BEARISH", range_state).get("status") != "MATCHED",
+        "MOMENTUM_DOES_NOT_MATCH_TRANSITION_MODE": evaluate_condition("COND_REGIME_MOMENTUM", range_state).get("status") != "MATCHED",
+        "FAKE_BULLISH_DOES_NOT_MATCH_OPPOSITE_REAL": evaluate_condition("COND_FAKE_BULLISH", bearish_state).get("status") != "MATCHED",
+        "FAKE_BEARISH_DOES_NOT_MATCH_OPPOSITE_REAL": evaluate_condition("COND_FAKE_BEARISH", bullish_state).get("status") != "MATCHED",
+        "FAKE_BULLISH_CAN_MATCH_BUYER_FAILURE": evaluate_condition("COND_FAKE_BULLISH", fake_bullish_fail_state).get("status") == "MATCHED",
+        "FAKE_BEARISH_CAN_MATCH_SELLER_FAILURE": evaluate_condition("COND_FAKE_BEARISH", fake_bearish_fail_state).get("status") == "MATCHED",
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    return {
+        "semantic_health": "PASS" if not failed else "FAILED",
+        "checks": checks,
+        "failed_tests": failed,
+    }
+
+
+def main() -> None:
+    result = run_condition_semantic_selftest()
+    if result["failed_tests"]:
+        print("FAILED_TESTS=" + ",".join(result["failed_tests"]))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()

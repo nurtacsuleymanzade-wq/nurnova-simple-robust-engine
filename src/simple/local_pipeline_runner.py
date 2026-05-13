@@ -59,6 +59,9 @@ _STAGES: list[tuple[str, str, str]] = [
     ("src.simple.unified_context_engine",         "NOARG",           "UNIFIED_CONTEXT_ENGINE"),
     ("src.simple.model_definition_registry",      "NOARG",           "MODEL_DEFINITION_REGISTRY"),
     ("src.simple.model_hunter_engine",            "NOARG",           "MODEL_HUNTER_ENGINE"),
+    ("src.simple.model_semantic_validator",       "NOARG",           "MODEL_SEMANTIC_VALIDATOR"),
+    ("src.simple.model_cluster_engine",           "NOARG",           "MODEL_CLUSTER_ENGINE"),
+    ("src.simple.model_cooldown_engine",          "NOARG",           "MODEL_COOLDOWN_ENGINE"),
     ("src.simple.paper_trade_factory",            "NOARG",           "PAPER_TRADE_FACTORY"),
     ("src.simple.research_paper_lifecycle_engine","NOARG",           "RESEARCH_PAPER_LIFECYCLE_ENGINE"),
     ("src.simple.research_edge_matrix_engine",    "NOARG",           "RESEARCH_EDGE_MATRIX_ENGINE"),
@@ -159,12 +162,26 @@ def _run_noarg_stage(module_path: str) -> tuple[dict[str, Any] | None, float, st
     t0 = time.monotonic()
     try:
         mod = importlib.import_module(module_path)
-        # run_ ile baslayan ilk fonksiyonu bul
-        run_fn = None
+        # Once module imports helper run_ functions from elsewhere, prefer the local engine runner.
+        run_candidates = []
+        imported_candidates = []
         for name in dir(mod):
-            if name.startswith("run_") and callable(getattr(mod, name)):
-                run_fn = getattr(mod, name)
+            fn = getattr(mod, name)
+            if not (name.startswith("run_") and callable(fn)):
+                continue
+            if getattr(fn, "__module__", None) == module_path:
+                run_candidates.append((name, fn))
+            else:
+                imported_candidates.append((name, fn))
+        run_fn = None
+        for name, fn in sorted(run_candidates):
+            if name.endswith("_engine"):
+                run_fn = fn
                 break
+        if run_fn is None and run_candidates:
+            run_fn = sorted(run_candidates)[0][1]
+        if run_fn is None and imported_candidates:
+            run_fn = sorted(imported_candidates)[0][1]
         if run_fn is None:
             raise ValueError(f"No run_ function found in {module_path}")
         result: dict[str, Any] = run_fn()

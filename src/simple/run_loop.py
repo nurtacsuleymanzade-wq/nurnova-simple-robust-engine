@@ -260,14 +260,33 @@ def print_summary(data: dict, cycle: int) -> None:
         )
 
     model_hunter = _read_json(STATE_DIR / "latest_model_hunter.json")
-    if model_hunter:
-        summary = model_hunter.get("summary") or {}
+    semantic_validation = _read_json(STATE_DIR / "latest_model_semantic_validation.json")
+    model_clusters = _read_json(STATE_DIR / "latest_model_clusters.json")
+    model_cooldown = _read_json(STATE_DIR / "latest_model_cooldown.json")
+    if semantic_validation:
+        summary = semantic_validation.get("summary") or {}
         print(
-            f"  MODELS   : detected={summary.get('detected_count', 0)} "
-            f"no_trade={summary.get('no_trade_count', 0)} "
-            f"top={summary.get('top_model_id', 'UNKNOWN')} "
-            f"quality={summary.get('top_model_quality', 'UNKNOWN')} "
-            f"score={_fmt_value(summary.get('top_model_score'))}"
+            f"  SEMANTIC : {semantic_validation.get('semantic_health', 'UNKNOWN')} "
+            f"errors={summary.get('semantic_error_count', 0)} "
+            f"contradictions={summary.get('contradiction_count', 0)}"
+        )
+    if model_hunter or semantic_validation:
+        hunter_summary = model_hunter.get("summary") or {}
+        semantic_summary = semantic_validation.get("summary") or {}
+        print(
+            f"  MODELS   : raw={hunter_summary.get('detected_count', 0)} "
+            f"valid={semantic_summary.get('validated_count', 0)} "
+            f"blocked_semantic={semantic_summary.get('blocked_count', 0)} "
+            f"top={hunter_summary.get('top_model_id', 'UNKNOWN')}"
+        )
+    if model_clusters or model_cooldown:
+        cluster_summary = model_clusters.get("summary") or {}
+        cooldown_summary = model_cooldown.get("summary") or {}
+        print(
+            f"  CLUST    : clusters={cluster_summary.get('cluster_count', 0)} "
+            f"suppressed={cluster_summary.get('suppressed_duplicate_count', 0)} "
+            f"allowed={cooldown_summary.get('allowed_count', cluster_summary.get('cluster_count', 0))} "
+            f"cooldown_blocked={cooldown_summary.get('blocked_count', 0)}"
         )
 
     research_lifecycle = _read_json(STATE_DIR / "latest_research_paper_lifecycle.json")

@@ -1,4 +1,4 @@
-"""Paper Trade Factory for model instances."""
+"""Paper Trade Factory for validated research model clusters."""
 
 from __future__ import annotations
 
@@ -16,6 +16,9 @@ OUTPUT_PATH = STATE_DIR / "latest_paper_trade_factory.json"
 HISTORY_PATH = DATA_DIR / "paper_trade_factory_history.jsonl"
 
 MODEL_HUNTER_PATH = STATE_DIR / "latest_model_hunter.json"
+SEMANTIC_VALIDATION_PATH = STATE_DIR / "latest_model_semantic_validation.json"
+CLUSTERS_PATH = STATE_DIR / "latest_model_clusters.json"
+COOLDOWN_PATH = STATE_DIR / "latest_model_cooldown.json"
 OBSERVATION_PATH = STATE_DIR / "latest_observation_factory.json"
 DNA_PATH = STATE_DIR / "latest_mtf_candle_dna.json"
 LIQUIDITY_PATH = STATE_DIR / "latest_liquidity_map.json"
@@ -58,9 +61,18 @@ def _current_price(observation: dict[str, Any], dna: dict[str, Any]) -> float | 
     return _safe_float((((dna.get("1m") or {}).get("close"))))
 
 
-def _paper_trade_id(model_instance_id: str, entry: float | None) -> str:
-    raw = f"{model_instance_id}|{entry}"
+def _paper_trade_id(seed: str, entry: float | None) -> str:
+    raw = f"{seed}|{entry}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
+
+
+def _quality_rank(level: Any) -> float:
+    return {
+        "A_PLUS": 1.0,
+        "HIGH": 0.85,
+        "MEDIUM": 0.7,
+        "LOW": 0.55,
+    }.get(str(level or "UNKNOWN").upper(), 0.4)
 
 
 def _target_reference(direction: str, entry: float, liquidity: dict[str, Any]) -> dict[str, Any] | None:
@@ -87,8 +99,53 @@ def _target_reference(direction: str, entry: float, liquidity: dict[str, Any]) -
     return best
 
 
+def _singleton_cluster(model: dict[str, Any], source_mode: str) -> dict[str, Any]:
+    cluster_id = f"SINGLETON_{model.get('model_instance_id')}"
+    return {
+        "cluster_id": cluster_id,
+        "direction": model.get("direction"),
+        "cluster_family": model.get("model_family"),
+        "dominant_context": model.get("dominant_context"),
+        "dominant_model_id": model.get("model_id"),
+        "models": [model],
+        "model_count": 1,
+        "best_quality": model.get("quality"),
+        "best_score": model.get("match_score"),
+        "cluster_score": model.get("coherence_score") or model.get("match_score"),
+        "paper_representative": model,
+        "suppressed_duplicates": [],
+        "reason_codes": [f"{source_mode}_SINGLETON_CLUSTER"],
+    }
+
+
+def _select_candidates(
+    hunter: dict[str, Any],
+    semantic: dict[str, Any],
+    clusters: dict[str, Any],
+    cooldown: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str, list[str]]:
+    if cooldown and (cooldown.get("allowed_clusters") or cooldown.get("blocked_clusters")):
+        return list(cooldown.get("allowed_clusters") or []), "MODEL_COOLDOWN_ALLOWED_CLUSTERS", ["COOLDOWN_LAYER_USED"]
+
+    if clusters and clusters.get("clusters"):
+        return list(clusters.get("clusters") or []), "MODEL_CLUSTER_FALLBACK", ["COOLDOWN_MISSING", "CLUSTER_LAYER_USED"]
+
+    if semantic and (semantic.get("validated_models") or semantic.get("blocked_models")):
+        records = [_singleton_cluster(model, "SEMANTIC_VALIDATION") for model in (semantic.get("validated_models") or []) if model.get("paper_allowed")]
+        return records, "MODEL_SEMANTIC_VALIDATION_FALLBACK", ["COOLDOWN_MISSING", "CLUSTERS_MISSING", "SEMANTIC_LAYER_USED"]
+
+    if hunter and hunter.get("detected_models"):
+        records = [_singleton_cluster(model, "RAW_MODEL_HUNTER") for model in (hunter.get("detected_models") or [])]
+        return records, "RAW_MODEL_HUNTER_LAST_RESORT", ["ALL_VALIDATION_LAYERS_MISSING", "RAW_MODEL_HUNTER_USED"]
+
+    return [], "NO_MODEL_INPUT", ["NO_TRADE_CANDIDATES"]
+
+
 def run_paper_trade_factory() -> dict[str, Any]:
     hunter = _load_json(MODEL_HUNTER_PATH) or {}
+    semantic = _load_json(SEMANTIC_VALIDATION_PATH) or {}
+    clusters = _load_json(CLUSTERS_PATH) or {}
+    cooldown = _load_json(COOLDOWN_PATH) or {}
     observation = _load_json(OBSERVATION_PATH) or {}
     dna = _load_json(DNA_PATH) or {}
     liquidity = _load_json(LIQUIDITY_PATH) or {}
@@ -97,20 +154,25 @@ def run_paper_trade_factory() -> dict[str, Any]:
 
     current_price = _current_price(observation, dna)
     atr_1m = _safe_float(((atr.get("1m") or {}).get("atr_14")))
-    detected_models = list(hunter.get("detected_models") or [])
+    selected_clusters, source_selection_mode, selection_reason_codes = _select_candidates(hunter, semantic, clusters, cooldown)
     trades: list[dict[str, Any]] = []
 
-    for model_instance in detected_models:
-        direction = str(model_instance.get("direction"))
+    for cluster in selected_clusters:
+        representative = dict(cluster.get("paper_representative") or {})
+        direction = str(representative.get("direction") or cluster.get("direction") or "UNKNOWN")
         if direction not in ("LONG", "SHORT"):
             continue
+
         entry = current_price
         invalid_reason = None
-        reason_codes: list[str] = []
+        reason_codes: list[str] = list(cluster.get("reason_codes") or [])
+        if source_selection_mode == "MODEL_COOLDOWN_ALLOWED_CLUSTERS":
+            reason_codes.append("COOLDOWN_PASSED")
         if entry is None or entry <= 0:
             invalid_reason = "INVALID_ENTRY_PRICE"
-        if atr_1m is not None and atr_1m > 0:
-            risk_distance = max(atr_1m, entry * 0.001) if entry is not None else None
+
+        if atr_1m is not None and atr_1m > 0 and entry is not None:
+            risk_distance = max(atr_1m, entry * 0.001)
         else:
             risk_distance = entry * 0.002 if entry is not None else None
             reason_codes.append("FALLBACK_STOP_DISTANCE_USED")
@@ -134,15 +196,21 @@ def run_paper_trade_factory() -> dict[str, Any]:
             rr_tp1 = 1.5
             rr_tp2 = 2.5
 
-        target_ref = _target_reference(direction, entry or 0.0, liquidity) if entry is not None else None
+        source_cluster = dict(cluster)
+        source_cluster["paper_representative"] = representative
         trade = {
-            "paper_trade_id": _paper_trade_id(str(model_instance.get("model_instance_id")), entry),
-            "model_instance_id": model_instance.get("model_instance_id"),
-            "model_id": model_instance.get("model_id"),
-            "model_family": model_instance.get("model_family"),
+            "paper_trade_id": _paper_trade_id(str(cluster.get("cluster_id") or representative.get("model_instance_id")), entry),
+            "model_instance_id": representative.get("model_instance_id"),
+            "model_id": representative.get("model_id"),
+            "model_family": representative.get("model_family") or cluster.get("cluster_family"),
+            "cluster_id": cluster.get("cluster_id"),
+            "dominant_model_id": cluster.get("dominant_model_id") or representative.get("model_id"),
             "direction": direction,
-            "quality": model_instance.get("quality"),
-            "match_score": model_instance.get("match_score"),
+            "quality": representative.get("quality"),
+            "match_score": representative.get("match_score"),
+            "semantic_status": representative.get("semantic_status", "UNKNOWN"),
+            "coherence_score": representative.get("coherence_score") or cluster.get("cluster_score"),
+            "cooldown_key": representative.get("cooldown_key") or cluster.get("cooldown_key"),
             "entry": entry,
             "stop_loss": stop_loss,
             "tp1": tp1,
@@ -150,47 +218,62 @@ def run_paper_trade_factory() -> dict[str, Any]:
             "rr_tp1": rr_tp1,
             "rr_tp2": rr_tp2,
             "risk_distance": risk_distance,
-            "target_reference": target_ref,
+            "target_reference": _target_reference(direction, entry or 0.0, liquidity) if entry is not None else None,
             "opened_at": _utc_now(),
             "max_holding_seconds": 1800,
             "status": "INVALID" if invalid_reason else "OPEN_CANDIDATE",
             "invalid_reason": invalid_reason,
-            "reason_codes": reason_codes,
-            "source_model_instance": model_instance,
+            "reason_codes": sorted(set(reason_codes)),
+            "source_model_instance": representative.get("source_model_instance") or representative,
+            "source_cluster": source_cluster,
             "source_business_zone_ref": business_zone.get("timestamp_utc"),
         }
         trades.append(trade)
 
     output = {
         "timestamp_utc": _utc_now(),
-        "symbol": str(observation.get("symbol") or hunter.get("symbol") or "BTCUSDT"),
+        "symbol": str(observation.get("symbol") or hunter.get("symbol") or semantic.get("symbol") or "BTCUSDT"),
         "block_id": BLOCK_ID,
         "source": {
-            "source_mode": "MODEL_INSTANCE_TO_PAPER_FACTORY",
+            "source_mode": source_selection_mode,
         },
         "paper_trades": trades,
         "summary": {
-            "candidate_models": len(detected_models),
+            "candidate_models": len(hunter.get("detected_models") or []),
+            "validated_models": len(semantic.get("validated_models") or []),
+            "cluster_count": len(clusters.get("clusters") or []),
+            "allowed_clusters": len(cooldown.get("allowed_clusters") or []),
             "paper_trade_candidates": len([trade for trade in trades if trade.get("status") == "OPEN_CANDIDATE"]),
             "invalid_candidates": len([trade for trade in trades if trade.get("status") == "INVALID"]),
         },
         "reason_codes": [
             f"PAPER_TRADES_{len(trades)}",
+            *selection_reason_codes,
             "LOW_QUALITY_MODELS_ALLOWED",
             "NO_LIVE_EXECUTION",
             "NO_PRIVATE_API",
             "PAPER_ONLY",
         ],
         "data_quality": {
-            "level": "HIGH" if hunter else "LOW",
+            "level": "HIGH" if any((hunter, semantic, clusters, cooldown)) else "LOW",
             "missing_inputs": [name for name, payload in {
                 "latest_model_hunter": hunter,
+                "latest_model_semantic_validation": semantic,
+                "latest_model_clusters": clusters,
+                "latest_model_cooldown": cooldown,
                 "latest_observation_factory": observation,
                 "latest_mtf_candle_dna": dna,
                 "latest_liquidity_map": liquidity,
                 "latest_business_zone": business_zone,
                 "latest_atr_state": atr,
             }.items() if not payload],
+        },
+        "raw_model_observability": {
+            "raw_detected_models": list(hunter.get("detected_models") or []),
+            "validated_models": list(semantic.get("validated_models") or []),
+            "blocked_semantic_models": list(semantic.get("blocked_models") or []),
+            "clusters": list(clusters.get("clusters") or []),
+            "cooldown_blocked_clusters": list(cooldown.get("blocked_clusters") or []),
         },
         "feeds_next": [
             "RESEARCH_PAPER_LIFECYCLE_ENGINE",
@@ -203,6 +286,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
             "live_order_sent": False,
         },
     }
+
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT_PATH.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
     _append_jsonl(HISTORY_PATH, output)
