@@ -196,6 +196,65 @@ def print_summary(data: dict, cycle: int) -> None:
         neutral_text = _compact_scenario_line("neutral", scenarios.get("neutral_range_scenario") or {})
         print(f"  SCN      : bull={bull_text} | bear={bear_text} | neutral={neutral_text}")
 
+    business_zone = _read_json(STATE_DIR / "latest_business_zone.json")
+    if business_zone:
+        value_area = business_zone.get("value_area") or {}
+        auction = business_zone.get("auction_summary") or {}
+        print(
+            f"  BIZ      : value={value_area.get('value_position', 'UNKNOWN')} "
+            f"| poc={_fmt_value(value_area.get('poc'))} "
+            f"| auction={auction.get('auction_state', 'UNKNOWN')}"
+        )
+
+    market_regime = _read_json(STATE_DIR / "latest_market_regime.json")
+    if market_regime:
+        print(
+            f"  REG      : mode={market_regime.get('regime', 'UNKNOWN')} "
+            f"| day={market_regime.get('day_type', 'UNKNOWN')} "
+            f"| bias={market_regime.get('directional_bias', 'UNKNOWN')}"
+        )
+
+    intent_analysis = _read_json(STATE_DIR / "latest_intent_analysis.json")
+    if intent_analysis:
+        intent = intent_analysis.get("intent_analysis") or {}
+        print(
+            f"  INTENT   : iceberg={intent.get('iceberg_detected', False)} "
+            f"spoof={intent.get('spoof_detected', False)} "
+            f"trapped={intent.get('trapped_side', 'UNKNOWN')} "
+            f"intent={intent.get('intent', 'UNKNOWN')}"
+        )
+
+    positioning = _read_json(STATE_DIR / "latest_positioning_context.json")
+    if positioning:
+        pos = positioning.get("positioning") or {}
+        print(
+            f"  POS      : crowded={pos.get('crowded_side', 'UNKNOWN')} "
+            f"funding={pos.get('funding_context', 'MISSING')} "
+            f"oi={pos.get('oi_context', 'MISSING')} "
+            f"squeeze={pos.get('squeeze_risk', 'UNKNOWN')}"
+        )
+
+    momentum = _read_json(STATE_DIR / "latest_momentum_continuation.json")
+    double_dist = _read_json(STATE_DIR / "latest_double_distribution_reversal.json")
+    trap = _read_json(STATE_DIR / "latest_trap_trader.json")
+    if momentum or double_dist or trap:
+        print(
+            f"  SETUP_FAM: momentum={bool((momentum or {}).get('active', False))} "
+            f"trap={bool((trap or {}).get('active', False))} "
+            f"double_dist={bool((double_dist or {}).get('active', False))}"
+        )
+
+    unified_context = _read_json(STATE_DIR / "latest_unified_context.json")
+    if unified_context:
+        readiness = unified_context.get("readiness") or {}
+        missing = readiness.get("missing_before_setup") or []
+        missing_text = ",".join(missing[:3]) if missing else "none"
+        print(
+            f"  CTX      : dominant={unified_context.get('dominant_context', 'UNKNOWN')} "
+            f"| ready={readiness.get('context_ready_for_setup_selection', False)} "
+            f"| missing={missing_text}"
+        )
+
     # --- Setup candidate ---
     sc = _read_json(STATE_DIR / "latest_setup_candidate.json")
     if sc:
