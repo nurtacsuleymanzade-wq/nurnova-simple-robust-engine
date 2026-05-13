@@ -259,6 +259,7 @@ def print_summary(data: dict, cycle: int) -> None:
     semantic_validation = _read_json(STATE_DIR / "latest_model_semantic_validation.json")
     model_clusters = _read_json(STATE_DIR / "latest_model_clusters.json")
     model_cooldown = _read_json(STATE_DIR / "latest_model_cooldown.json")
+    setup_activation = _read_json(STATE_DIR / "latest_setup_family_activation.json")
     if semantic_validation:
         summary = semantic_validation.get("summary") or {}
         print(
@@ -279,16 +280,25 @@ def print_summary(data: dict, cycle: int) -> None:
         cluster_summary = model_clusters.get("summary") or {}
         cooldown_summary = model_cooldown.get("summary") or {}
         print(
-            f"  CLUST    : clusters={cluster_summary.get('cluster_count', 0)} "
-            f"suppressed={cluster_summary.get('suppressed_duplicate_count', 0)} "
+            f"  CLUST     : clusters={cluster_summary.get('cluster_count', 0)} "
             f"allowed={cooldown_summary.get('allowed_count', cluster_summary.get('cluster_count', 0))} "
             f"cooldown_blocked={cooldown_summary.get('blocked_count', 0)}"
+        )
+    if setup_activation:
+        missing = setup_activation.get("missing") or []
+        missing_text = ",".join(str(item) for item in missing[:3]) if missing else "none"
+        print(
+            f"  SETUP_ACT : family={setup_activation.get('dominant_setup_family', 'NO_ACTIVE_SETUP_FAMILY')} "
+            f"dir={setup_activation.get('direction', 'NEUTRAL')} "
+            f"score={_fmt_value(setup_activation.get('activation_score'))} "
+            f"ready={setup_activation.get('ready_for_paper_research', False)} "
+            f"missing={missing_text}"
         )
 
     research_lifecycle = _read_json(STATE_DIR / "latest_research_paper_lifecycle.json")
     if research_lifecycle:
         print(
-            f"  PAPER    : opened={len(research_lifecycle.get('new_trades_opened') or [])} "
+            f"  PAPER     : opened={len(research_lifecycle.get('new_trades_opened') or [])} "
             f"open={research_lifecycle.get('total_open', 0)} "
             f"closed={research_lifecycle.get('total_closed', 0)}"
         )

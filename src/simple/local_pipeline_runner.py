@@ -62,6 +62,7 @@ _STAGES: list[tuple[str, str, str]] = [
     ("src.simple.model_semantic_validator",       "NOARG",           "MODEL_SEMANTIC_VALIDATOR"),
     ("src.simple.model_cluster_engine",           "NOARG",           "MODEL_CLUSTER_ENGINE"),
     ("src.simple.model_cooldown_engine",          "NOARG",           "MODEL_COOLDOWN_ENGINE"),
+    ("src.simple.setup_family_activation_engine", "NOARG",           "SETUP_FAMILY_ACTIVATION_ENGINE"),
     ("src.simple.paper_trade_factory",            "NOARG",           "PAPER_TRADE_FACTORY"),
     ("src.simple.research_paper_lifecycle_engine","NOARG",           "RESEARCH_PAPER_LIFECYCLE_ENGINE"),
     ("src.simple.research_edge_matrix_engine",    "NOARG",           "RESEARCH_EDGE_MATRIX_ENGINE"),

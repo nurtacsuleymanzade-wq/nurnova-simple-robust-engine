@@ -19,6 +19,7 @@ MODEL_HUNTER_PATH = STATE_DIR / "latest_model_hunter.json"
 SEMANTIC_VALIDATION_PATH = STATE_DIR / "latest_model_semantic_validation.json"
 CLUSTERS_PATH = STATE_DIR / "latest_model_clusters.json"
 COOLDOWN_PATH = STATE_DIR / "latest_model_cooldown.json"
+SETUP_ACTIVATION_PATH = STATE_DIR / "latest_setup_family_activation.json"
 OBSERVATION_PATH = STATE_DIR / "latest_observation_factory.json"
 DNA_PATH = STATE_DIR / "latest_mtf_candle_dna.json"
 LIQUIDITY_PATH = STATE_DIR / "latest_liquidity_map.json"
@@ -66,15 +67,6 @@ def _paper_trade_id(seed: str, entry: float | None) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
 
 
-def _quality_rank(level: Any) -> float:
-    return {
-        "A_PLUS": 1.0,
-        "HIGH": 0.85,
-        "MEDIUM": 0.7,
-        "LOW": 0.55,
-    }.get(str(level or "UNKNOWN").upper(), 0.4)
-
-
 def _target_reference(direction: str, entry: float, liquidity: dict[str, Any]) -> dict[str, Any] | None:
     best: dict[str, Any] | None = None
     for level in liquidity.get("detected_levels") or []:
@@ -99,6 +91,19 @@ def _target_reference(direction: str, entry: float, liquidity: dict[str, Any]) -
     return best
 
 
+def _compact_model(model: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model_instance_id": model.get("model_instance_id"),
+        "model_id": model.get("model_id"),
+        "model_family": model.get("model_family"),
+        "direction": model.get("direction"),
+        "match_score": model.get("match_score"),
+        "coherence_score": model.get("coherence_score"),
+        "dominant_context": model.get("dominant_context"),
+        "semantic_status": model.get("semantic_status"),
+    }
+
+
 def _singleton_cluster(model: dict[str, Any], source_mode: str) -> dict[str, Any]:
     cluster_id = f"SINGLETON_{model.get('model_instance_id')}"
     return {
@@ -118,25 +123,69 @@ def _singleton_cluster(model: dict[str, Any], source_mode: str) -> dict[str, Any
     }
 
 
+def _canonical_setup_family(*values: Any) -> str:
+    text = " ".join(str(value or "") for value in values).upper()
+    if any(token in text for token in ("LIQUIDITY_SWEEP_REVERSAL", "LSR_", "PLR_")):
+        return "LIQUIDITY_SWEEP_REVERSAL"
+    if any(token in text for token in ("ABSORPTION_REVERSAL", "ABSORPTION", "AR01", "DAF", "ICEBERG_ABSORPTION")):
+        return "ABSORPTION_REVERSAL"
+    if any(token in text for token in ("DOUBLE_DISTRIBUTION_REVERSAL", "VALUE_ROTATION", "BUSINESS_ZONE_ROTATION")):
+        return "DOUBLE_DISTRIBUTION_REVERSAL"
+    if any(token in text for token in ("TRAP_REVERSAL", "FAILED_BREAKOUT_TRAP", "STOP_RUN_ABSORPTION", "TRAP_BUYERS", "TRAP_SELLERS", "FCR")):
+        return "TRAP_REVERSAL"
+    if any(token in text for token in ("MOMENTUM_CONTINUATION", "ACCEPTANCE_BREAKOUT", "INITIATIVE_BREAKOUT", "MTF_ALIGNMENT", "VOLATILITY_EXPANSION_CONTINUATION", "CONTINUATION")):
+        return "MOMENTUM_CONTINUATION"
+    return "NO_ACTIVE_SETUP_FAMILY"
+
+
+def _cluster_setup_family(cluster: dict[str, Any]) -> str:
+    representative = cluster.get("paper_representative") or {}
+    return _canonical_setup_family(
+        cluster.get("cluster_family"),
+        cluster.get("dominant_context"),
+        cluster.get("dominant_model_id"),
+        representative.get("model_family"),
+        representative.get("model_id"),
+        " ".join(str(item) for item in (cluster.get("model_families") or [])),
+    )
+
+
+def _activation_ready_clusters(activation: dict[str, Any]) -> list[dict[str, Any]]:
+    if not activation or not bool(activation.get("ready_for_paper_research")):
+        return []
+    selected: list[dict[str, Any]] = []
+    for cluster in activation.get("source_clusters") or []:
+        if not isinstance(cluster, dict):
+            continue
+        direction = str(cluster.get("direction") or "UNKNOWN").upper()
+        if direction in {"LONG", "SHORT"} and cluster.get("paper_representative"):
+            selected.append(cluster)
+    return selected
+
+
 def _select_candidates(
-    hunter: dict[str, Any],
+    activation: dict[str, Any],
     semantic: dict[str, Any],
     clusters: dict[str, Any],
     cooldown: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], str, list[str]]:
-    if cooldown and (cooldown.get("allowed_clusters") or cooldown.get("blocked_clusters")):
-        return list(cooldown.get("allowed_clusters") or []), "MODEL_COOLDOWN_ALLOWED_CLUSTERS", ["COOLDOWN_LAYER_USED"]
+    activation_clusters = _activation_ready_clusters(activation)
+    if activation_clusters:
+        return activation_clusters, "SETUP_FAMILY_ACTIVATION_READY", ["SETUP_FAMILY_ACTIVATION_USED"]
+
+    if cooldown:
+        if cooldown.get("allowed_clusters"):
+            return list(cooldown.get("allowed_clusters") or []), "MODEL_COOLDOWN_ALLOWED_CLUSTERS", ["COOLDOWN_LAYER_USED"]
+        return [], "MODEL_COOLDOWN_BLOCKED", ["COOLDOWN_LAYER_USED", "NO_ALLOWED_CLUSTERS"]
 
     if clusters and clusters.get("clusters"):
-        return list(clusters.get("clusters") or []), "MODEL_CLUSTER_FALLBACK", ["COOLDOWN_MISSING", "CLUSTER_LAYER_USED"]
+        if semantic and semantic.get("validated_models"):
+            return list(clusters.get("clusters") or []), "MODEL_CLUSTER_FALLBACK", ["COOLDOWN_MISSING", "CLUSTER_LAYER_USED"]
+        return [], "MODEL_CLUSTER_BLOCKED", ["COOLDOWN_MISSING", "SEMANTIC_LAYER_MISSING"]
 
     if semantic and (semantic.get("validated_models") or semantic.get("blocked_models")):
         records = [_singleton_cluster(model, "SEMANTIC_VALIDATION") for model in (semantic.get("validated_models") or []) if model.get("paper_allowed")]
         return records, "MODEL_SEMANTIC_VALIDATION_FALLBACK", ["COOLDOWN_MISSING", "CLUSTERS_MISSING", "SEMANTIC_LAYER_USED"]
-
-    if hunter and hunter.get("detected_models"):
-        records = [_singleton_cluster(model, "RAW_MODEL_HUNTER") for model in (hunter.get("detected_models") or [])]
-        return records, "RAW_MODEL_HUNTER_LAST_RESORT", ["ALL_VALIDATION_LAYERS_MISSING", "RAW_MODEL_HUNTER_USED"]
 
     return [], "NO_MODEL_INPUT", ["NO_TRADE_CANDIDATES"]
 
@@ -146,6 +195,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
     semantic = _load_json(SEMANTIC_VALIDATION_PATH) or {}
     clusters = _load_json(CLUSTERS_PATH) or {}
     cooldown = _load_json(COOLDOWN_PATH) or {}
+    activation = _load_json(SETUP_ACTIVATION_PATH) or {}
     observation = _load_json(OBSERVATION_PATH) or {}
     dna = _load_json(DNA_PATH) or {}
     liquidity = _load_json(LIQUIDITY_PATH) or {}
@@ -154,12 +204,19 @@ def run_paper_trade_factory() -> dict[str, Any]:
 
     current_price = _current_price(observation, dna)
     atr_1m = _safe_float(((atr.get("1m") or {}).get("atr_14")))
-    selected_clusters, source_selection_mode, selection_reason_codes = _select_candidates(hunter, semantic, clusters, cooldown)
+    selected_clusters, source_selection_mode, selection_reason_codes = _select_candidates(activation, semantic, clusters, cooldown)
     trades: list[dict[str, Any]] = []
+
+    activation_ready = bool(activation.get("ready_for_paper_research"))
+    dominant_setup_family = str(activation.get("dominant_setup_family") or "NO_ACTIVE_SETUP_FAMILY")
+    activation_score = float(activation.get("activation_score") or 0.0)
+    activation_reasons = list(activation.get("activation_reasons") or [])
+    activation_source_models = list(activation.get("source_models") or [])
+    activation_source_clusters = list(activation.get("source_clusters") or [])
 
     for cluster in selected_clusters:
         representative = dict(cluster.get("paper_representative") or {})
-        direction = str(representative.get("direction") or cluster.get("direction") or "UNKNOWN")
+        direction = str(representative.get("direction") or cluster.get("direction") or "UNKNOWN").upper()
         if direction not in ("LONG", "SHORT"):
             continue
 
@@ -168,6 +225,8 @@ def run_paper_trade_factory() -> dict[str, Any]:
         reason_codes: list[str] = list(cluster.get("reason_codes") or [])
         if source_selection_mode == "MODEL_COOLDOWN_ALLOWED_CLUSTERS":
             reason_codes.append("COOLDOWN_PASSED")
+        if source_selection_mode == "SETUP_FAMILY_ACTIVATION_READY":
+            reason_codes.append("SETUP_FAMILY_ACTIVATION_READY")
         if entry is None or entry <= 0:
             invalid_reason = "INVALID_ENTRY_PRICE"
 
@@ -196,6 +255,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
             rr_tp1 = 1.5
             rr_tp2 = 2.5
 
+        setup_family = dominant_setup_family if activation_ready else _cluster_setup_family(cluster)
         source_cluster = dict(cluster)
         source_cluster["paper_representative"] = representative
         trade = {
@@ -203,6 +263,12 @@ def run_paper_trade_factory() -> dict[str, Any]:
             "model_instance_id": representative.get("model_instance_id"),
             "model_id": representative.get("model_id"),
             "model_family": representative.get("model_family") or cluster.get("cluster_family"),
+            "setup_family": setup_family,
+            "dominant_setup_family": setup_family,
+            "activation_score": activation_score if activation_ready else float(cluster.get("cluster_score") or representative.get("coherence_score") or representative.get("match_score") or 0.0),
+            "activation_reasons": activation_reasons if activation_ready else ["ACTIVATION_LAYER_NOT_READY_FALLBACK_TO_ALLOWED_CLUSTER"],
+            "source_models": activation_source_models if activation_ready else [_compact_model(representative)],
+            "source_clusters": activation_source_clusters if activation_ready else [source_cluster],
             "cluster_id": cluster.get("cluster_id"),
             "dominant_model_id": cluster.get("dominant_model_id") or representative.get("model_id"),
             "direction": direction,
@@ -232,7 +298,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
 
     output = {
         "timestamp_utc": _utc_now(),
-        "symbol": str(observation.get("symbol") or hunter.get("symbol") or semantic.get("symbol") or "BTCUSDT"),
+        "symbol": str(observation.get("symbol") or semantic.get("symbol") or hunter.get("symbol") or "BTCUSDT"),
         "block_id": BLOCK_ID,
         "source": {
             "source_mode": source_selection_mode,
@@ -243,6 +309,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
             "validated_models": len(semantic.get("validated_models") or []),
             "cluster_count": len(clusters.get("clusters") or []),
             "allowed_clusters": len(cooldown.get("allowed_clusters") or []),
+            "setup_family_activation_ready": activation_ready,
             "paper_trade_candidates": len([trade for trade in trades if trade.get("status") == "OPEN_CANDIDATE"]),
             "invalid_candidates": len([trade for trade in trades if trade.get("status") == "INVALID"]),
         },
@@ -255,12 +322,12 @@ def run_paper_trade_factory() -> dict[str, Any]:
             "PAPER_ONLY",
         ],
         "data_quality": {
-            "level": "HIGH" if any((hunter, semantic, clusters, cooldown)) else "LOW",
+            "level": "HIGH" if any((semantic, clusters, cooldown, activation)) else "LOW",
             "missing_inputs": [name for name, payload in {
-                "latest_model_hunter": hunter,
                 "latest_model_semantic_validation": semantic,
                 "latest_model_clusters": clusters,
                 "latest_model_cooldown": cooldown,
+                "latest_setup_family_activation": activation,
                 "latest_observation_factory": observation,
                 "latest_mtf_candle_dna": dna,
                 "latest_liquidity_map": liquidity,
@@ -274,6 +341,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
             "blocked_semantic_models": list(semantic.get("blocked_models") or []),
             "clusters": list(clusters.get("clusters") or []),
             "cooldown_blocked_clusters": list(cooldown.get("blocked_clusters") or []),
+            "setup_family_activation": activation,
         },
         "feeds_next": [
             "RESEARCH_PAPER_LIFECYCLE_ENGINE",

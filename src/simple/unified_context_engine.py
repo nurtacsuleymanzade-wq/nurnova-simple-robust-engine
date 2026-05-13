@@ -25,6 +25,7 @@ MARKET_STRUCTURE_PATH = STATE_DIR / "latest_market_structure.json"
 LIQUIDITY_MAP_PATH = STATE_DIR / "latest_liquidity_map.json"
 INTERPRETATION_PATH = STATE_DIR / "latest_interpretation.json"
 THREE_SCENARIOS_PATH = STATE_DIR / "latest_three_scenarios.json"
+SETUP_ACTIVATION_PATH = STATE_DIR / "latest_setup_family_activation.json"
 
 
 def _utc_now() -> str:
@@ -70,6 +71,7 @@ def run_unified_context_engine() -> dict[str, Any]:
     liquidity_map = _load_json(LIQUIDITY_MAP_PATH) or {}
     interpretation = _load_json(INTERPRETATION_PATH) or {}
     three_scenarios = _load_json(THREE_SCENARIOS_PATH) or {}
+    setup_activation = _load_json(SETUP_ACTIVATION_PATH) or {}
 
     missing_inputs: list[str] = []
     for name, payload in (
@@ -104,6 +106,8 @@ def run_unified_context_engine() -> dict[str, Any]:
         active_setup_families.append("TRAP_REVERSAL")
     if double_dist.get("active"):
         active_setup_families.append("DOUBLE_DISTRIBUTION_REVERSAL")
+    if setup_activation.get("active_families"):
+        active_setup_families = list(dict.fromkeys(setup_activation.get("active_families") or active_setup_families))
 
     dominant_context = "UNKNOWN"
     if momentum.get("active"):
@@ -168,6 +172,8 @@ def run_unified_context_engine() -> dict[str, Any]:
         missing_before_setup.append("ORDERFLOW_STATE_UNKNOWN")
     if not active_setup_families:
         missing_before_setup.append("NO_ACTIVE_SETUP_FAMILY")
+    if setup_activation.get("missing"):
+        missing_before_setup = list(setup_activation.get("missing") or missing_before_setup)
 
     score = 0.0
     available_count = 0
@@ -187,6 +193,14 @@ def run_unified_context_engine() -> dict[str, Any]:
         if payload:
             available_count += 1
     score = min(1.0, available_count / 11.0)
+    dominant_setup_family = str(setup_activation.get("dominant_setup_family") or "")
+    if not dominant_setup_family:
+        dominant_setup_family = dominant_context if dominant_context in {
+            "MOMENTUM_CONTINUATION",
+            "TRAP_REVERSAL",
+            "DOUBLE_DISTRIBUTION_REVERSAL",
+        } else "NO_ACTIVE_SETUP_FAMILY"
+    ready_for_paper_research = bool(setup_activation.get("ready_for_paper_research")) if setup_activation else (not missing_before_setup and dominant_context != "UNKNOWN")
 
     output = {
         "timestamp_utc": _utc_now(),
@@ -226,8 +240,11 @@ def run_unified_context_engine() -> dict[str, Any]:
         },
         "active_setup_families": active_setup_families,
         "dominant_context": dominant_context,
+        "dominant_setup_family": dominant_setup_family,
+        "ready_for_paper_research": ready_for_paper_research,
+        "missing": missing_before_setup,
         "readiness": {
-            "context_ready_for_setup_selection": not missing_before_setup and dominant_context != "UNKNOWN",
+            "context_ready_for_setup_selection": ready_for_paper_research,
             "missing_before_setup": missing_before_setup,
         },
         "is_trade_signal": False,
