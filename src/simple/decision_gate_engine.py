@@ -82,6 +82,7 @@ def compute_decision_gate(
     block_reasons: list[str] = []
     warning_reasons: list[str] = []
     reason_codes: list[str] = []
+    model_registry_provided = model_registry is not None
 
     input_available = trade_plan is not None
     input_status = "OK" if input_available else "MISSING"
@@ -90,7 +91,7 @@ def compute_decision_gate(
         block_reasons.append("TRADE_PLAN_MISSING")
     if scenario_trigger is None:
         warning_reasons.append("SCENARIO_TRIGGER_MISSING")
-    if not model_registry or int(model_registry.get("active_model_count", 0) or 0) == 0:
+    if model_registry_provided and int((model_registry or {}).get("active_model_count", 0) or 0) == 0:
         warning_reasons.append("NO_MODEL_SIGNAL")
     if trade_plan and trade_plan.get("model_veto", False):
         block_reasons.append("MODEL_VETO_DETECTED")
@@ -103,6 +104,7 @@ def compute_decision_gate(
     evidence = evidence or {}
     persistence = persistence or {}
     model_registry = model_registry or {}
+    identity = dict((trade_plan or {}).get("identity") or (scenario_trigger or {}).get("identity") or {})
 
     symbol = (
         trade_plan.get("symbol")
@@ -126,6 +128,9 @@ def compute_decision_gate(
     dq_level = plan_dq.get("level", "MISSING")
     dq_score = float(plan_dq.get("score", 0.0))
     model_veto = bool(trade_plan.get("model_veto", False))
+    setup_family = str(identity.get("setup_family") or "NO_SETUP")
+    active_model_count = int(model_registry.get("active_model_count", 0) or 0)
+    model_consensus = str(model_registry.get("consensus_direction", "NEUTRAL")).upper()
 
     ready_for_entry = bool(scenario_trigger.get("ready_for_entry", False))
     trigger_strength = float(scenario_trigger.get("trigger_strength", 0.0))
@@ -180,6 +185,10 @@ def compute_decision_gate(
         block_reasons.append("EMPTY_PLAN_REASONS")
     if input_available and dq_level in ("INVALID", "MISSING"):
         block_reasons.append(f"DATA_QUALITY_INVALID_{dq_level}")
+    if identity and setup_family in ("", "NO_SETUP", "NO_TRADE_CONTEXT", "NONE", "UNKNOWN"):
+        block_reasons.append(f"SETUP_FAMILY_INVALID_{setup_family}")
+    if model_registry_provided and model_consensus == "NEUTRAL" and active_model_count == 0:
+        block_reasons.append("MODEL_CONSENSUS_NEUTRAL_NO_SIGNAL")
 
     if input_available and dq_level == "LOW":
         warning_reasons.append("DATA_QUALITY_LOW")
@@ -278,6 +287,16 @@ def compute_decision_gate(
         "symbol": symbol,
         "source": source,
         "context_id": context_id,
+        "identity": {
+            **identity,
+            "source_engine": "S18_DECISION_GATE",
+            "input_state_refs": [
+                "state/simple/latest_trade_plan.json",
+                "state/simple/latest_scenario_trigger.json",
+                "state/simple/latest_setup_context.json",
+                "state/simple/latest_model_registry.json",
+            ],
+        },
         "input_status": input_status,
         "depth_veto": depth_veto,
         "depth_reason": depth_reason,
@@ -315,6 +334,16 @@ def no_valid_output(reason: str) -> dict[str, Any]:
         "block_id": "S18_DECISION_GATE",
         "symbol": "UNKNOWN",
         "source": "NONE",
+        "identity": {
+            "setup_id": None,
+            "setup_family": "NO_SETUP",
+            "model_id": None,
+            "model_name": "NO_MODEL",
+            "candidate_id": None,
+            "context_id": None,
+            "source_engine": "S18_DECISION_GATE",
+            "input_state_refs": [],
+        },
         "input_status": "MISSING",
         "decision": "BLOCK",
         "decision_status": "INVALID",

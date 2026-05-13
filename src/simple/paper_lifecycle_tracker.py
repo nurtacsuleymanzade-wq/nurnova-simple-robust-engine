@@ -113,15 +113,62 @@ def _classify_dq(score: float, missing_price: bool) -> dict[str, Any]:
     return {"score": round(max(0.0, min(1.0, score)), 4), "level": level, "issues": issues}
 
 
+def _merge_identity(*states: dict[str, Any] | None) -> dict[str, Any]:
+    identity: dict[str, Any] = {}
+    for state in states:
+        candidate = (state or {}).get("identity")
+        if isinstance(candidate, dict):
+            identity.update({k: v for k, v in candidate.items() if v is not None})
+    identity.setdefault("setup_id", None)
+    identity.setdefault("setup_family", "NO_SETUP")
+    identity.setdefault("model_id", None)
+    identity.setdefault("model_name", "NO_MODEL")
+    identity.setdefault("candidate_id", None)
+    identity.setdefault("context_id", None)
+    identity["source_engine"] = BLOCK_ID
+    identity["input_state_refs"] = [
+        "state/simple/latest_decision_gate.json",
+        "state/simple/latest_trade_plan.json",
+        "state/simple/latest_scenario_trigger.json",
+    ]
+    return identity
+
+
+def _build_lineage(
+    identity: dict[str, Any],
+    decision_gate: dict[str, Any] | None,
+    trade_plan: dict[str, Any] | None,
+    scenario_trigger: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "setup_id": identity.get("setup_id"),
+        "setup_family": identity.get("setup_family", "NO_SETUP"),
+        "model_id": identity.get("model_id"),
+        "model_name": identity.get("model_name", "NO_MODEL"),
+        "candidate_id": identity.get("candidate_id"),
+        "context_id": identity.get("context_id"),
+        "scenario_label": (scenario_trigger or {}).get("scenario_label", "UNKNOWN"),
+        "trigger_state": (scenario_trigger or {}).get("trigger_state", "UNKNOWN"),
+        "plan_status": (trade_plan or {}).get("plan_status", "UNKNOWN"),
+        "decision": (decision_gate or {}).get("decision", "UNKNOWN"),
+        "block_reasons": list((decision_gate or {}).get("block_reasons") or []),
+        "warning_reasons": list((decision_gate or {}).get("warning_reasons") or []),
+    }
+
+
 def _no_lifecycle(
     symbol: str,
     source: str,
     reason: str,
     decision_gate: dict[str, Any] | None,
     alert: dict[str, Any] | None,
+    trade_plan: dict[str, Any] | None = None,
+    scenario_trigger: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     decision = (decision_gate or {}).get("decision", "UNKNOWN")
     alert_status = (alert or {}).get("alert_status", "UNKNOWN")
+    identity = _merge_identity(trade_plan, scenario_trigger, decision_gate)
+    lineage = _build_lineage(identity, decision_gate, trade_plan, scenario_trigger)
     return {
         "timestamp_utc": _utc_now(),
         "block_id": BLOCK_ID,
@@ -146,6 +193,8 @@ def _no_lifecycle(
         "max_favorable_excursion_r": 0.0,
         "max_adverse_excursion_r": 0.0,
         "lifecycle_events": [],
+        "identity": identity,
+        "lineage": lineage,
         "data_quality": {"score": 0.0, "level": "MISSING", "issues": [reason]},
         "reason_codes": [
             f"SYMBOL_{symbol}",
@@ -180,10 +229,20 @@ def compute_paper_lifecycle(
     source = (decision_gate or {}).get("block_id") or "S18_DECISION_GATE"
 
     if decision_gate is None or alert is None:
-        return _no_lifecycle(symbol, source, "MISSING_INPUTS", decision_gate, alert)
+        return _no_lifecycle(
+            symbol, source, "MISSING_INPUTS", decision_gate, alert, trade_plan, scenario_trigger,
+        )
 
     if not _allowed_for_lifecycle(decision_gate, alert):
-        return _no_lifecycle(symbol, source, "DECISION_NOT_ALLOWED_FOR_PAPER", decision_gate, alert)
+        return _no_lifecycle(
+            symbol,
+            source,
+            "DECISION_NOT_ALLOWED_FOR_PAPER",
+            decision_gate,
+            alert,
+            trade_plan,
+            scenario_trigger,
+        )
 
     side = str(decision_gate.get("selected_side", "UNKNOWN")).upper()
     entry = decision_gate.get("selected_entry")
@@ -193,7 +252,9 @@ def compute_paper_lifecycle(
     invalidation = (trade_plan or {}).get("invalidation_price")
 
     if side not in ("LONG", "SHORT") or entry is None or sl is None or tp1 is None or tp2 is None:
-        return _no_lifecycle(symbol, source, "PLAN_FIELDS_MISSING", decision_gate, alert)
+        return _no_lifecycle(
+            symbol, source, "PLAN_FIELDS_MISSING", decision_gate, alert, trade_plan, scenario_trigger,
+        )
 
     entry_f = float(entry)
     sl_f = float(sl)
@@ -334,7 +395,13 @@ def compute_paper_lifecycle(
 
     # Build lineage — birth_timestamp from prior if continuing, else now
     birth_ts = (prior or {}).get("lineage", {}).get("birth_timestamp") or ts
+    identity = _merge_identity(trade_plan, scenario_trigger, decision_gate)
     lineage = {
+        "setup_id": identity.get("setup_id"),
+        "setup_family": identity.get("setup_family", "NO_SETUP"),
+        "model_id": identity.get("model_id"),
+        "model_name": identity.get("model_name", "NO_MODEL"),
+        "candidate_id": identity.get("candidate_id"),
         "context_id": (context_sync or {}).get("context_id"),
         "source_scenario_id": (scenario_trigger or {}).get("scenario_label"),
         "source_setup_status": ((setup_candidate or {}).get("setup_candidate") or {}).get("setup_status"),
@@ -343,6 +410,12 @@ def compute_paper_lifecycle(
         "source_confidence": (scenario_trigger or {}).get("trigger_confidence"),
         "source_liquidity_bias": (depth_memory or {}).get("liquidity_bias"),
         "source_wall_lifecycle": ((wall_lifecycle or {}).get("liquidity_intelligence") or {}).get("dominant_real_side"),
+        "scenario_label": (scenario_trigger or {}).get("scenario_label", "UNKNOWN"),
+        "trigger_state": (scenario_trigger or {}).get("trigger_state", "UNKNOWN"),
+        "plan_status": (trade_plan or {}).get("plan_status", "UNKNOWN"),
+        "decision": (decision_gate or {}).get("decision", "UNKNOWN"),
+        "block_reasons": list((decision_gate or {}).get("block_reasons") or []),
+        "warning_reasons": list((decision_gate or {}).get("warning_reasons") or []),
         "birth_timestamp": birth_ts,
     }
 
@@ -395,6 +468,7 @@ def compute_paper_lifecycle(
         "max_favorable_excursion_r": round(mfe, 4),
         "max_adverse_excursion_r": round(mae, 4),
         "lifecycle_events": events,
+        "identity": identity,
         "lineage": lineage,
         "data_quality": dq,
         "reason_codes": reason_codes,

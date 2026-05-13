@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,7 @@ REPORTS_DIR = Path("reports/simple")
 FLOW_STATE_PATH = STATE_DIR / "latest_flow_state.json"
 EVIDENCE_PATH = STATE_DIR / "latest_flow_evidence.json"
 PERSISTENCE_PATH = STATE_DIR / "latest_flow_persistence.json"
+CONTEXT_SYNC_PATH = STATE_DIR / "latest_context_sync.json"
 SETUP_CONTEXT_PATH = STATE_DIR / "latest_setup_context.json"
 S15_STATE_PATH = STATE_DIR / "s15_setup_context_state.json"
 SETUP_CONTEXT_LOG_PATH = DATA_DIR / "setup_context_history.jsonl"
@@ -37,6 +39,62 @@ def _load_json(path: Path) -> dict[str, Any] | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def _context_candle_close_time(
+    flow_state: dict[str, Any] | None,
+    evidence: dict[str, Any] | None,
+    persistence: dict[str, Any] | None,
+) -> str:
+    latest_bucket = (flow_state or {}).get("latest_bucket") or {}
+    return (
+        latest_bucket.get("bucket_second")
+        or (flow_state or {}).get("bucket_second")
+        or (evidence or {}).get("timestamp_utc")
+        or (persistence or {}).get("timestamp_utc")
+        or "UNKNOWN"
+    )
+
+
+def _setup_family_from_label(label: str) -> str:
+    if label == "NO_TRADE_CONTEXT":
+        return "NO_TRADE_CONTEXT"
+    if label in ("INSUFFICIENT_CONTEXT", "CHOPPY_CONTEXT", "NEUTRAL_CONTEXT"):
+        return "NO_SETUP"
+    if "LONG" in label:
+        return "LONG_CONTEXT"
+    if "SHORT" in label:
+        return "SHORT_CONTEXT"
+    return "NO_SETUP"
+
+
+def _build_identity(
+    symbol: str,
+    setup_label: str,
+    tradeable: bool,
+    candle_close_time: str,
+    context_id: str | None,
+) -> dict[str, Any]:
+    setup_family = _setup_family_from_label(setup_label)
+    setup_id = None
+    if tradeable and setup_family not in ("NO_SETUP", "NO_TRADE_CONTEXT") and context_id:
+        raw = f"{symbol}|{context_id}|{setup_label}|{candle_close_time}"
+        setup_id = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+    return {
+        "setup_id": setup_id,
+        "setup_family": setup_family,
+        "model_id": None,
+        "model_name": "NO_MODEL",
+        "candidate_id": None,
+        "context_id": context_id,
+        "source_engine": "S15_FLOW_TO_SETUP_CONTEXT",
+        "input_state_refs": [
+            "state/simple/latest_flow_state.json",
+            "state/simple/latest_flow_evidence.json",
+            "state/simple/latest_flow_persistence.json",
+            "state/simple/latest_context_sync.json",
+        ],
+    }
 
 
 def _compute_context_score(evidence_score: float, persistence_score: float) -> float:
@@ -148,6 +206,7 @@ def compute_setup_context(
     flow_state: dict[str, Any] | None,
     evidence: dict[str, Any] | None,
     persistence: dict[str, Any] | None,
+    context_sync: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ts = _now_utc()
 
@@ -216,6 +275,9 @@ def compute_setup_context(
     tradeable = _tradeable(label, direction, confidence, persistence_label, combined_dq_level)
 
     context_reason = _context_reason(label, evidence_label, persistence_label, decay_risk, flip_risk, confidence)
+    candle_close_time = _context_candle_close_time(flow_state, evidence, persistence)
+    context_id = (context_sync or {}).get("context_id")
+    identity = _build_identity(symbol, label, tradeable, candle_close_time, context_id)
 
     reason_codes += [
         f"SYMBOL_{symbol}",
@@ -242,6 +304,8 @@ def compute_setup_context(
         "block_id": "S15_FLOW_TO_SETUP_CONTEXT",
         "symbol": symbol,
         "source": source,
+        "context_id": context_id,
+        "candle_close_time": candle_close_time,
         "input_status": input_status,
         "setup_context_label": label,
         "setup_context_score": score,
@@ -252,6 +316,7 @@ def compute_setup_context(
         "probability_summary": prob_summary,
         "tradeable": tradeable,
         "context_reason": context_reason,
+        "identity": identity,
         "data_quality": {"level": combined_dq_level, "score": combined_dq_score},
         "reason_codes": reason_codes,
         "feeds_next": {
@@ -351,6 +416,8 @@ def no_valid_context_output(reason: str) -> dict[str, Any]:
         "block_id": "S15_FLOW_TO_SETUP_CONTEXT",
         "symbol": "UNKNOWN",
         "source": "NONE",
+        "context_id": None,
+        "candle_close_time": "UNKNOWN",
         "input_status": "MISSING",
         "setup_context_label": "INSUFFICIENT_CONTEXT",
         "setup_context_score": 0.0,
@@ -360,6 +427,16 @@ def no_valid_context_output(reason: str) -> dict[str, Any]:
         "confidence": 0.0,
         "tradeable": False,
         "context_reason": "Input files missing — cannot determine context.",
+        "identity": {
+            "setup_id": None,
+            "setup_family": "NO_SETUP",
+            "model_id": None,
+            "model_name": "NO_MODEL",
+            "candidate_id": None,
+            "context_id": None,
+            "source_engine": "S15_FLOW_TO_SETUP_CONTEXT",
+            "input_state_refs": [],
+        },
         "data_quality": {"level": "MISSING", "score": 0.0},
         "reason_codes": [
             "INSUFFICIENT_CONTEXT",
@@ -384,12 +461,13 @@ def run_flow_to_setup_context_engine() -> dict[str, Any]:
     flow_state = _load_json(FLOW_STATE_PATH)
     evidence = _load_json(EVIDENCE_PATH)
     persistence = _load_json(PERSISTENCE_PATH)
+    context_sync = _load_json(CONTEXT_SYNC_PATH)
 
     if evidence is None and persistence is None:
         result = no_valid_context_output("EVIDENCE_AND_PERSISTENCE_MISSING")
     else:
         try:
-            result = compute_setup_context(flow_state, evidence, persistence)
+            result = compute_setup_context(flow_state, evidence, persistence, context_sync)
         except Exception:
             result = no_valid_context_output("COMPUTE_ERROR")
 

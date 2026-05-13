@@ -144,11 +144,22 @@ def _classify_record(rec: dict[str, Any]) -> dict[str, Any]:
 
     # Lineage-based fields
     lineage = rec.get("lineage") or {}
+    identity = rec.get("identity") or {}
     setup_grade     = str(lineage.get("source_setup_grade") or "UNKNOWN")
     liquidity_bias  = str(lineage.get("source_liquidity_bias") or "UNKNOWN")
     wall_conclusion = str(lineage.get("source_wall_lifecycle") or "UNKNOWN")
     trigger_strength = _safe_float(lineage.get("source_trigger_strength")) or 0.0
     hold_time_seconds = _safe_float(rec.get("hold_time_seconds")) or 0.0
+    setup_family = str(
+        lineage.get("setup_family")
+        or identity.get("setup_family")
+        or "UNKNOWN"
+    )
+    model_id = str(
+        lineage.get("model_id")
+        or identity.get("model_id")
+        or "NO_MODEL"
+    )
 
     return {
         "status": status,
@@ -170,6 +181,8 @@ def _classify_record(rec: dict[str, Any]) -> dict[str, Any]:
         "decision": decision_label or "UNKNOWN",
         "final_grade": final_grade or "UNKNOWN",
         "setup_grade": setup_grade,
+        "setup_family": setup_family,
+        "model_id": model_id,
         "liquidity_bias": liquidity_bias,
         "wall_conclusion": wall_conclusion,
         "trigger_strength": trigger_strength,
@@ -411,6 +424,8 @@ def build_edge_matrix(
     by_scenario   = _group_by(classified, "scenario_label")
     by_decision   = _group_by(classified, "decision")
     by_setup_grade   = _group_by(classified, "setup_grade")
+    by_setup_family  = _group_by(classified, "setup_family")
+    by_model_id      = _group_by(classified, "model_id")
     by_liquidity     = _group_by(classified, "liquidity_bias")
     by_wall          = _group_by(classified, "wall_conclusion")
 
@@ -507,6 +522,8 @@ def build_edge_matrix(
         "by_scenario_label": by_scenario,
         "by_decision": by_decision,
         "by_setup_grade": by_setup_grade,
+        "by_setup_family": by_setup_family,
+        "by_model_id": by_model_id,
         "by_liquidity_bias": by_liquidity,
         "by_wall_conclusion": by_wall,
         "edge_quality": edge_quality,

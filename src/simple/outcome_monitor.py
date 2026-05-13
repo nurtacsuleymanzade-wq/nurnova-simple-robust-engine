@@ -175,6 +175,34 @@ def _calc_r(side: str, entry: float | None, sl: float | None, price: float | Non
     return None
 
 
+def _merge_identity(
+    lifecycle: dict[str, Any] | None,
+    trade_plan: dict[str, Any] | None,
+    scenario_trigger: dict[str, Any] | None,
+) -> dict[str, Any]:
+    identity = dict(
+        (lifecycle or {}).get("identity")
+        or (trade_plan or {}).get("identity")
+        or (scenario_trigger or {}).get("identity")
+        or {}
+    )
+    identity.setdefault("setup_id", None)
+    identity.setdefault("setup_family", "NO_SETUP")
+    identity.setdefault("model_id", None)
+    identity.setdefault("model_name", "NO_MODEL")
+    identity.setdefault("candidate_id", None)
+    identity.setdefault("context_id", None)
+    identity["source_engine"] = BLOCK_ID
+    identity["input_state_refs"] = [
+        "state/simple/latest_paper_lifecycle.json",
+        "state/simple/latest_trade_plan.json",
+        "state/simple/latest_decision_gate.json",
+        "state/simple/latest_scenario_trigger.json",
+        "state/simple/latest_setup_context.json",
+    ]
+    return identity
+
+
 def _no_outcome(
     symbol: str,
     source: str,
@@ -187,6 +215,8 @@ def _no_outcome(
     invalid: bool = False,
 ) -> dict[str, Any]:
     outcome_status = "INVALID" if invalid else "NO_OUTCOME"
+    identity = _merge_identity(lifecycle, trade_plan, scenario_trigger)
+    lineage = dict((lifecycle or {}).get("lineage") or {})
     return {
         "timestamp_utc": _utc_now(),
         "block_id": BLOCK_ID,
@@ -205,6 +235,8 @@ def _no_outcome(
         "realized_r": None,
         "mfe_r": (lifecycle or {}).get("max_favorable_excursion_r", 0.0),
         "mae_r": (lifecycle or {}).get("max_adverse_excursion_r", 0.0),
+        "identity": identity,
+        "lineage": lineage,
         "close_reason": reason,
         "setup_context_snapshot": _setup_snap(setup_context),
         "scenario_trigger_snapshot": _scenario_snap(scenario_trigger),
@@ -344,6 +376,7 @@ def compute_outcome(
 
     # Lineage from lifecycle
     lineage = dict(lifecycle.get("lineage") or {})
+    identity = _merge_identity(lifecycle, trade_plan, scenario_trigger)
 
     # Data quality from lifecycle
     lc_dq = lifecycle.get("data_quality") or {}
@@ -395,6 +428,7 @@ def compute_outcome(
         "mfe_r": round(mfe, 4),
         "mae_r": round(mae, 4),
         "hold_time_seconds": hold_time_seconds,
+        "identity": identity,
         "lineage": lineage,
         "close_reason": close_reason,
         "setup_context_snapshot": _setup_snap(setup_context),

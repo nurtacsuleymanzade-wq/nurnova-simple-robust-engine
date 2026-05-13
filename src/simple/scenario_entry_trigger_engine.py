@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -128,6 +129,46 @@ def _flow_candle_close_time(flow_state: dict[str, Any] | None) -> str:
         or flow_state.get("timestamp_utc")
         or "UNKNOWN"
     )
+
+
+def _build_identity(
+    setup_context: dict[str, Any],
+    model_registry: dict[str, Any] | None,
+    symbol: str,
+    candle_close_time: str,
+    scenario_label: str,
+) -> dict[str, Any]:
+    base_identity = dict(setup_context.get("identity") or {})
+    active_signals = list((model_registry or {}).get("active_signals") or [])
+    active_model_count = int((model_registry or {}).get("active_model_count", 0) or 0)
+    if active_model_count > 0 and active_signals:
+        model_names = [str(sig.get("model", "UNKNOWN")) for sig in active_signals]
+        model_name = "+".join(model_names)
+        model_id = hashlib.sha1(model_name.encode("utf-8")).hexdigest()[:16]
+    else:
+        model_name = "NO_MODEL"
+        model_id = None
+    setup_id = base_identity.get("setup_id")
+    candidate_id = None
+    if scenario_label != "NO_SCENARIO" and setup_id:
+        raw = f"{setup_id}|{scenario_label}|{candle_close_time}"
+        candidate_id = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+    return {
+        "setup_id": setup_id,
+        "setup_family": base_identity.get("setup_family", "NO_SETUP"),
+        "model_id": model_id,
+        "model_name": model_name,
+        "candidate_id": candidate_id,
+        "context_id": base_identity.get("context_id"),
+        "source_engine": "S16_SCENARIO_ENTRY_TRIGGER",
+        "input_state_refs": [
+            "state/simple/latest_setup_context.json",
+            "state/simple/latest_flow_state.json",
+            "state/simple/latest_flow_evidence.json",
+            "state/simple/latest_flow_persistence.json",
+            "state/simple/latest_model_registry.json",
+        ],
+    }
 
 
 def _trigger_strength(
@@ -323,6 +364,7 @@ def compute_scenario_trigger(
     setup_label = setup_context.get("setup_context_label", "INSUFFICIENT_CONTEXT")
     setup_score = float(setup_context.get("setup_context_score", 0.0))
     direction_bias = setup_context.get("direction_bias", "UNKNOWN")
+    diagnostic_direction_bias = direction_bias
     context_confidence = float(setup_context.get("confidence", 0.0))
     tradeable_context = bool(setup_context.get("tradeable", False))
     setup_dq = setup_context.get("data_quality", {})
@@ -348,6 +390,8 @@ def compute_scenario_trigger(
         direction_bias = "UNKNOWN"
         setup_score = 0.0
 
+    actionable_context_blocked = setup_label == "NO_TRADE_CONTEXT"
+
     if model_registry and int(model_registry.get("active_model_count", 0) or 0) > 0:
         model_consensus = model_registry.get("consensus_direction", "NEUTRAL")
         model_signal_count = int(model_registry.get("active_model_count", 0) or 0)
@@ -371,46 +415,65 @@ def compute_scenario_trigger(
     if model_consensus != "NEUTRAL" and direction_bias in ("LONG", "SHORT"):
         model_setup_aligned = model_consensus == direction_bias
 
-    scenario_label = _scenario_label(
-        setup_label, evidence_label, persistence_label,
-        direction_bias, decay_risk, flip_risk, setup_score, context_confidence,
-    )
-    if model_override:
-        scenario_label = f"MODEL_{direction_bias}_OVERRIDE"
+    if actionable_context_blocked:
+        direction_bias = "NEUTRAL"
+        scenario_label = "NO_SCENARIO"
+        scenario_score = 0.0
+        trigger_strength = 0.0
+        trigger_state = "NO_TRIGGER"
+        move_p, failure_p, fakeout_p = 0.0, 1.0, 0.0
+        market_regime = "RANGING"
+        trigger_confidence = 0.0
+        ready = False
+        tradeable = False
+        trigger_reason = "Setup context blocked actionable scenario generation."
+        reason_codes.append("BLOCKED_BY_NO_TRADE_CONTEXT")
+        if not tradeable_context:
+            reason_codes.append("NOT_TRADEABLE_CONTEXT")
+    else:
+        scenario_label = _scenario_label(
+            setup_label, evidence_label, persistence_label,
+            direction_bias, decay_risk, flip_risk, setup_score, context_confidence,
+        )
+        if model_override:
+            scenario_label = f"MODEL_{direction_bias}_OVERRIDE"
 
-    scenario_score = _scenario_score(setup_score, persistence_score, evidence_score)
+        scenario_score = _scenario_score(setup_score, persistence_score, evidence_score)
 
-    trigger_strength = _trigger_strength(
-        context_confidence, setup_score, continuation_quality, decay_risk, flip_risk
-    )
+        trigger_strength = _trigger_strength(
+            context_confidence, setup_score, continuation_quality, decay_risk, flip_risk
+        )
 
-    trigger_state = _trigger_state(
-        scenario_label, setup_label, direction_bias, tradeable_context,
-        context_confidence, trigger_strength, decay_risk, flip_risk,
-        dq_level, persistence_label, input_status,
-    )
+        trigger_state = _trigger_state(
+            scenario_label, setup_label, direction_bias, tradeable_context,
+            context_confidence, trigger_strength, decay_risk, flip_risk,
+            dq_level, persistence_label, input_status,
+        )
 
-    move_p, failure_p, fakeout_p = _probabilities(
-        trigger_strength, decay_risk, flip_risk, scenario_label
-    )
+        move_p, failure_p, fakeout_p = _probabilities(
+            trigger_strength, decay_risk, flip_risk, scenario_label
+        )
 
-    market_regime = _market_regime(
-        persistence_label, scenario_label, flip_risk, direction_bias, input_status
-    )
+        market_regime = _market_regime(
+            persistence_label, scenario_label, flip_risk, direction_bias, input_status
+        )
 
-    trigger_confidence = _clamp(round(context_confidence * trigger_strength, 4), 0.0, 1.0)
+        trigger_confidence = _clamp(round(context_confidence * trigger_strength, 4), 0.0, 1.0)
 
-    ready = _ready_for_entry(
-        trigger_state, tradeable_context, context_confidence, trigger_strength,
-        dq_level, persistence_label, direction_bias,
-    )
+        ready = _ready_for_entry(
+            trigger_state, tradeable_context, context_confidence, trigger_strength,
+            dq_level, persistence_label, direction_bias,
+        )
 
-    tradeable = ready
+        tradeable = ready
 
-    trigger_reason = _trigger_reason(
-        scenario_label, trigger_state, decay_risk, flip_risk,
-        context_confidence, trigger_strength,
-    )
+        trigger_reason = _trigger_reason(
+            scenario_label, trigger_state, decay_risk, flip_risk,
+            context_confidence, trigger_strength,
+        )
+
+    candle_close_time = _flow_candle_close_time(flow_state)
+    identity = _build_identity(setup_context, model_registry, symbol, candle_close_time, scenario_label)
 
     reason_codes += [
         f"SYMBOL_{symbol}",
@@ -438,9 +501,11 @@ def compute_scenario_trigger(
         "block_id": "S16_SCENARIO_ENTRY_TRIGGER",
         "symbol": symbol,
         "source": source,
+        "context_id": identity.get("context_id"),
         "scenario_label": scenario_label,
         "scenario_score": scenario_score,
         "direction_bias": direction_bias,
+        "diagnostic_direction_bias": diagnostic_direction_bias,
         "trigger_state": trigger_state,
         "trigger_strength": trigger_strength,
         "trigger_confidence": trigger_confidence,
@@ -451,6 +516,7 @@ def compute_scenario_trigger(
         "market_regime": market_regime,
         "tradeable": tradeable,
         "ready_for_entry": ready,
+        "identity": identity,
         "model_integration": {
             "model_consensus": model_consensus,
             "model_strength": round(model_strength, 1),
@@ -458,7 +524,7 @@ def compute_scenario_trigger(
             "model_setup_aligned": model_setup_aligned,
         },
         "timeframe": "1m",
-        "candle_close_time": _flow_candle_close_time(flow_state),
+        "candle_close_time": candle_close_time,
         "data_quality": {"level": dq_level, "score": dq_score},
         "reason_codes": reason_codes,
         "feeds_next": {"next_blocks": ["S17_TRADE_PLAN_ENGINE"]},
@@ -477,9 +543,11 @@ def no_valid_output(reason: str) -> dict[str, Any]:
         "block_id": "S16_SCENARIO_ENTRY_TRIGGER",
         "symbol": "UNKNOWN",
         "source": "NONE",
+        "context_id": None,
         "scenario_label": "INSUFFICIENT_DATA",
         "scenario_score": 0.0,
         "direction_bias": "UNKNOWN",
+        "diagnostic_direction_bias": "UNKNOWN",
         "trigger_state": "NO_TRIGGER",
         "trigger_strength": 0.0,
         "trigger_confidence": 0.0,
@@ -490,6 +558,16 @@ def no_valid_output(reason: str) -> dict[str, Any]:
         "market_regime": "UNKNOWN",
         "tradeable": False,
         "ready_for_entry": False,
+        "identity": {
+            "setup_id": None,
+            "setup_family": "NO_SETUP",
+            "model_id": None,
+            "model_name": "NO_MODEL",
+            "candidate_id": None,
+            "context_id": None,
+            "source_engine": "S16_SCENARIO_ENTRY_TRIGGER",
+            "input_state_refs": [],
+        },
         "model_integration": {
             "model_consensus": "NEUTRAL",
             "model_strength": 0.0,

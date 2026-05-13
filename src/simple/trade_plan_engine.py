@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -160,6 +161,52 @@ def _market_candle_close_time(market_truth: dict[str, Any] | None) -> str:
     )
 
 
+def _model_identity(model_registry: dict[str, Any] | None) -> tuple[str | None, str]:
+    active_signals = list((model_registry or {}).get("active_signals") or [])
+    if active_signals:
+        names = [str(sig.get("model", "UNKNOWN")) for sig in active_signals]
+        model_name = "+".join(names)
+        return hashlib.sha1(model_name.encode("utf-8")).hexdigest()[:16], model_name
+    return None, "NO_MODEL"
+
+
+def _build_identity(
+    scenario_trigger: dict[str, Any],
+    setup_context: dict[str, Any],
+    model_registry: dict[str, Any] | None,
+    context_sync: dict[str, Any] | None,
+    candle_close_time: str,
+) -> dict[str, Any]:
+    base = dict((scenario_trigger.get("identity") or {}) or (setup_context.get("identity") or {}))
+    model_id, model_name = _model_identity(model_registry)
+    setup_id = base.get("setup_id")
+    setup_family = base.get("setup_family", "NO_SETUP")
+    candidate_id = base.get("candidate_id")
+    context_id = (context_sync or {}).get("context_id") or base.get("context_id")
+    if setup_id and candidate_id is None and scenario_trigger.get("scenario_label") not in (None, "NO_SCENARIO"):
+        raw = f"{setup_id}|{scenario_trigger.get('scenario_label')}|{candle_close_time}"
+        candidate_id = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+    return {
+        "setup_id": setup_id,
+        "setup_family": setup_family,
+        "model_id": model_id,
+        "model_name": model_name,
+        "candidate_id": candidate_id,
+        "context_id": context_id,
+        "source_engine": "S17_TRADE_PLAN_ENGINE",
+        "input_state_refs": [
+            "state/simple/latest_scenario_trigger.json",
+            "state/simple/latest_setup_context.json",
+            "state/simple/latest_flow_state.json",
+            "state/simple/latest_flow_evidence.json",
+            "state/simple/latest_flow_persistence.json",
+            "state/simple/latest_market_truth.json",
+            "state/simple/latest_model_registry.json",
+            "state/simple/latest_context_sync.json",
+        ],
+    }
+
+
 def compute_trade_plan(
     scenario_trigger: dict[str, Any] | None,
     setup_context: dict[str, Any] | None,
@@ -202,6 +249,8 @@ def compute_trade_plan(
         or "UNKNOWN"
     )
     source = scenario_trigger.get("block_id") or "S16_SCENARIO_ENTRY_TRIGGER"
+    setup_label = setup_context.get("setup_context_label", "INSUFFICIENT_CONTEXT")
+    setup_tradeable = bool(setup_context.get("tradeable", False))
 
     direction_bias = scenario_trigger.get("direction_bias", "UNKNOWN")
     trigger_state = scenario_trigger.get("trigger_state", "NO_TRIGGER")
@@ -221,8 +270,10 @@ def compute_trade_plan(
         side = "SHORT"
     elif direction_bias == "NEUTRAL":
         side = "NEUTRAL"
+    diagnostic_side = side
 
     ref_price = _extract_reference_price(flow_state, evidence)
+    candle_close_time = _market_candle_close_time(market_truth)
 
     plan_status = "NO_PLAN"
     plan_grade = "NO_PLAN"
@@ -233,6 +284,7 @@ def compute_trade_plan(
     rr_tp1 = 0.0
     rr_tp2 = 0.0
     invalidation_price: float | None = None
+    preview_plan: dict[str, Any] | None = None
 
     entry_reason = "No actionable trigger — no entry planned."
     stop_reason = "No plan — stop not defined."
@@ -358,14 +410,68 @@ def compute_trade_plan(
             plan_grade = "NO_PLAN"
             quality_score = 0.0
 
+    model_signal_count = int((model_registry or {}).get("active_model_count", 0) or 0)
+    model_consensus = str((model_registry or {}).get("consensus_direction", "NEUTRAL")).upper()
+    model_registry_present = model_registry is not None
+
+    no_actionable_reasons: list[str] = []
+    if scenario_label == "NO_SCENARIO":
+        no_actionable_reasons.append("NO_ACTIONABLE_PLAN")
+    if setup_label == "NO_TRADE_CONTEXT":
+        no_actionable_reasons.append("BLOCKED_BY_NO_TRADE_CONTEXT")
+    if not setup_tradeable and setup_label == "NO_TRADE_CONTEXT":
+        no_actionable_reasons.append("NOT_TRADEABLE_CONTEXT")
+    if (
+        model_registry_present
+        and model_consensus == "NEUTRAL"
+        and model_signal_count == 0
+        and (setup_label == "NO_TRADE_CONTEXT" or scenario_label == "NO_SCENARIO")
+    ):
+        no_actionable_reasons.append("BLOCKED_BY_NEUTRAL_MODEL_CONSENSUS")
+    if dq_level in ("LOW", "CRITICAL", "INVALID") and setup_label == "NO_TRADE_CONTEXT":
+        no_actionable_reasons.append("NO_ACTIONABLE_PLAN")
+
+    no_actionable_reasons = list(dict.fromkeys(no_actionable_reasons))
+    if side in ("LONG", "SHORT") and entry_price is not None:
+        preview_plan = {
+            "side": side,
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "tp1": tp1,
+            "tp2": tp2,
+            "rr_tp1": rr_tp1,
+            "rr_tp2": rr_tp2,
+            "preview_only": True,
+        }
+
+    if not model_veto and input_status != "MISSING" and no_actionable_reasons:
+        plan_status = "NO_ACTIONABLE_PLAN"
+        plan_grade = "NO_PLAN"
+        quality_score = 0.0
+        side = "NEUTRAL"
+        entry_price = None
+        stop_loss = None
+        tp1 = None
+        tp2 = None
+        rr_tp1 = None
+        rr_tp2 = None
+        invalidation_price = None
+        entry_reason = "No actionable trade plan — diagnostic preview only."
+        stop_reason = "No actionable trade plan — stop level kept only in preview_plan."
+        tp_reason = "No actionable trade plan — target levels kept only in preview_plan."
+        invalidation_reason = "No actionable trade plan — invalidation kept only in preview_plan."
+        reason_codes.extend(no_actionable_reasons)
+        if preview_plan is not None:
+            reason_codes.append("PREVIEW_ONLY_LEVELS")
+
     if plan_status == "PLAN_READY":
         plan_grade = _grade_from_rr(rr_tp1, rr_tp2, trigger_strength, confidence)
     elif plan_status == "WATCH_ONLY":
         plan_grade = "WATCH"
-    elif plan_status in ("NO_PLAN", "INVALID"):
+    elif plan_status in ("NO_PLAN", "INVALID", "NO_ACTIONABLE_PLAN"):
         plan_grade = "NO_PLAN"
 
-    if plan_status != "NO_PLAN" and plan_status != "INVALID":
+    if plan_status not in ("NO_PLAN", "INVALID", "NO_ACTIONABLE_PLAN"):
         quality_score = _quality_score(rr_tp1, rr_tp2, trigger_strength, confidence, dq_score)
 
     plan_explanation = {
@@ -403,6 +509,7 @@ def compute_trade_plan(
 
     # context_id'yi sync'ten al
     context_id = (context_sync or {}).get("context_id", "CTX_UNKNOWN") if context_sync else "CTX_UNKNOWN"
+    identity = _build_identity(scenario_trigger, setup_context, model_registry, context_sync, candle_close_time)
 
     return {
         "timestamp_utc": ts,
@@ -410,9 +517,11 @@ def compute_trade_plan(
         "symbol": symbol,
         "source": source,
         "context_id": context_id,
+        "identity": identity,
         "input_status": input_status,
         "plan_status": plan_status,
         "side": side,
+        "diagnostic_side": diagnostic_side,
         "entry_price": entry_price,
         "stop_loss": stop_loss,
         "tp1": tp1,
@@ -420,6 +529,7 @@ def compute_trade_plan(
         "rr_tp1": rr_tp1,
         "rr_tp2": rr_tp2,
         "invalidation_price": invalidation_price,
+        "preview_plan": preview_plan,
         "plan_quality_score": quality_score,
         "plan_grade": plan_grade,
         "entry_reason": entry_reason,
@@ -429,7 +539,7 @@ def compute_trade_plan(
         "model_veto": model_veto,
         "model_veto_reason": model_veto_reason,
         "timeframe": "1m",
-        "candle_close_time": _market_candle_close_time(market_truth),
+        "candle_close_time": candle_close_time,
         "risk_context": risk_context,
         "data_quality": {"level": dq_level, "score": dq_score},
         "reason_codes": reason_codes,
@@ -450,15 +560,27 @@ def no_valid_output(reason: str) -> dict[str, Any]:
         "symbol": "UNKNOWN",
         "source": "NONE",
         "input_status": "MISSING",
+        "identity": {
+            "setup_id": None,
+            "setup_family": "NO_SETUP",
+            "model_id": None,
+            "model_name": "NO_MODEL",
+            "candidate_id": None,
+            "context_id": None,
+            "source_engine": "S17_TRADE_PLAN_ENGINE",
+            "input_state_refs": [],
+        },
         "plan_status": "NO_PLAN",
-        "side": "UNKNOWN",
+        "side": "NEUTRAL",
+        "diagnostic_side": "UNKNOWN",
         "entry_price": None,
         "stop_loss": None,
         "tp1": None,
         "tp2": None,
-        "rr_tp1": 0.0,
-        "rr_tp2": 0.0,
+        "rr_tp1": None,
+        "rr_tp2": None,
         "invalidation_price": None,
+        "preview_plan": None,
         "plan_quality_score": 0.0,
         "plan_grade": "NO_PLAN",
         "entry_reason": "Inputs missing — no plan can be built.",
