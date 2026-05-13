@@ -44,13 +44,15 @@ RESEARCH_LIFECYCLE_HISTORY_PATH = epoch_data_path("research_paper_lifecycle_hist
 TIMEFRAME_RESOLUTION_PATH = epoch_state_path("latest_timeframe_resolution.json")
 MARKET_STRUCTURE_PATH = STATE_DIR / "latest_market_structure.json"
 INTERPRETATION_PATH = STATE_DIR / "latest_interpretation.json"
+MODEL_SURVIVAL_FILTER_PATH = epoch_state_path("latest_model_survival_filter.json")
+RESEARCH_EDGE_MATRIX_PATH = epoch_state_path("latest_research_edge_matrix.json")
 
-MAX_OPEN_TOTAL = 12
+MAX_OPEN_TOTAL = 6
 MAX_OPEN_PER_MODEL_ID = 1
 MAX_OPEN_PER_DIRECTION = 6
-MAX_OPEN_PER_SETUP_FAMILY = 3
+MAX_OPEN_PER_SETUP_FAMILY = 1
 MAX_OPEN_PER_EVENT_ID = 1
-NEW_TRADES_CAP_PER_LOOP = 2
+NEW_TRADES_CAP_PER_LOOP = 1
 ALLOWED_RESEARCH_BANDS = {"STRONG_ACTIVE", "ACTIVE", "EARLY_RESEARCH"}
 MAX_TOP_CANDIDATES = 20
 
@@ -406,9 +408,18 @@ def _model_id_key(trade: dict[str, Any]) -> str:
     )
 
 
+def _event_bucket_key(trade: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(trade.get("symbol") or "UNKNOWN"),
+            str(trade.get("event_bucket_5m") or "UNKNOWN_BUCKET"),
+        ]
+    )
+
+
 def _lifecycle_open_state(
     lifecycle: dict[str, Any],
-) -> tuple[list[dict[str, Any]], Counter[str], Counter[str], Counter[str], Counter[str], dict[str, set[str]], dict[str, set[str]]]:
+) -> tuple[list[dict[str, Any]], Counter[str], Counter[str], Counter[str], Counter[str], dict[str, set[str]], dict[str, set[str]], dict[str, set[str]]]:
     open_trades = [trade for trade in (lifecycle.get("open_trades") or []) if str(trade.get("status") or "").upper() == "OPEN"]
     open_by_model_id: Counter[str] = Counter()
     open_by_family_direction: Counter[str] = Counter()
@@ -417,16 +428,129 @@ def _lifecycle_open_state(
     open_by_event_id: Counter[str] = Counter()
     open_context_directions: dict[str, set[str]] = {}
     open_model_family_directions: dict[str, set[str]] = {}
+    open_event_bucket_directions: dict[str, set[str]] = {}
     for trade in open_trades:
         event_id = str(trade.get("event_id") or derive_event_id(trade))
+        direction = str(trade.get("direction") or "UNKNOWN").upper()
         open_by_model_id[_model_id_key(trade)] += 1
         open_by_family_direction[_family_direction_key(trade)] += 1
-        open_by_direction[str(trade.get("direction") or "UNKNOWN").upper()] += 1
+        open_by_direction[direction] += 1
         open_by_setup_family[str(trade.get("setup_family") or "NO_ACTIVE_SETUP_FAMILY")] += 1
         open_by_event_id[event_id] += 1
-        open_context_directions.setdefault(_context_contradiction_key(trade), set()).add(str(trade.get("direction") or "UNKNOWN").upper())
-        open_model_family_directions.setdefault(_model_family_context_key(trade), set()).add(str(trade.get("direction") or "UNKNOWN").upper())
-    return open_trades, open_by_model_id, open_by_family_direction, open_by_direction, open_by_setup_family, open_by_event_id, open_context_directions, open_model_family_directions
+        open_context_directions.setdefault(_context_contradiction_key(trade), set()).add(direction)
+        open_model_family_directions.setdefault(_model_family_context_key(trade), set()).add(direction)
+        open_event_bucket_directions.setdefault(_event_bucket_key(trade), set()).add(direction)
+    return open_trades, open_by_model_id, open_by_family_direction, open_by_direction, open_by_setup_family, open_by_event_id, open_context_directions, open_model_family_directions, open_event_bucket_directions
+
+
+def _bad_token(value: Any) -> bool:
+    return str(value or "").strip().upper() in {"", "UNKNOWN", "NONE", "NO_EVENT", "NO_STRUCTURE", "NEUTRAL"}
+
+
+def _has_hard_semantic_contradiction(trade: dict[str, Any]) -> bool:
+    reason_text = " ".join(str(item).upper() for item in [
+        *(trade.get("risk_tags") or []),
+        *(trade.get("reason_codes") or []),
+        *(trade.get("grade_blockers") or []),
+        trade.get("semantic_status"),
+    ])
+    direction_resolution = trade.get("direction_resolution") or {}
+    resolution_mode = str(direction_resolution.get("resolution_mode") or "").upper()
+    return (
+        "HARD_DIRECTION_CONFLICT" in reason_text
+        or "SEMANTIC_CONTRADICTION" in reason_text
+        or "OPPOSITE_DIRECTION_VALIDATED_MODEL" in reason_text
+        or resolution_mode == "NEUTRAL_HARD_CONFLICT"
+    )
+
+
+def _mtf_alignment_contradictory(trade: dict[str, Any]) -> bool:
+    direction_resolution = trade.get("direction_resolution") or {}
+    mode = str(direction_resolution.get("resolution_mode") or "").upper()
+    if mode == "NEUTRAL_HARD_CONFLICT":
+        return True
+    conflicts = direction_resolution.get("direction_conflicts") or []
+    return bool(conflicts) and int(direction_resolution.get("conflict_count") or len(conflicts)) >= 2
+
+
+def _hard_entry_gate_reason(trade: dict[str, Any]) -> str | None:
+    grade = str(trade.get("signal_grade") or "D").upper()
+    activation_score = safe_float(trade.get("activation_score")) or 0.0
+    rr1 = safe_float(trade.get("rr1"))
+    rr2 = safe_float(trade.get("rr2"))
+    direction = str(trade.get("direction") or "NEUTRAL").upper()
+    confluence_count = int(trade.get("event_confluence_count") or 0)
+    if grade not in {"A_PLUS", "A"}:
+        return f"SIGNAL_GRADE_{grade}_DIAGNOSTIC_ONLY"
+    if activation_score < 0.80:
+        return "ACTIVATION_SCORE_BELOW_0_80"
+    if rr1 is None or rr1 < 1.2:
+        return "RR1_BELOW_1_2"
+    if rr2 is None or rr2 < 2.0:
+        return "RR2_BELOW_2_0"
+    if not trade.get("primary_tf"):
+        return "PRIMARY_TF_MISSING"
+    if not trade.get("context_tf"):
+        return "CONTEXT_TF_MISSING"
+    if direction not in {"LONG", "SHORT"}:
+        return "DIRECTION_NEUTRAL_OR_INVALID"
+    if confluence_count < 2:
+        return "EVENT_CONFLUENCE_LT_2"
+    if _mtf_alignment_contradictory(trade):
+        return "MTF_ALIGNMENT_CONTRADICTORY"
+    if _bad_token(trade.get("liquidity_event")):
+        return "LIQUIDITY_EVENT_MISSING"
+    if _bad_token(trade.get("structure_label")):
+        return "STRUCTURE_LABEL_MISSING"
+    if _has_hard_semantic_contradiction(trade):
+        return "HARD_SEMANTIC_CONTRADICTION"
+    return None
+
+
+def _survival_record(model_survival: dict[str, Any], model_id: str) -> dict[str, Any]:
+    record = (model_survival.get("models") or {}).get(model_id)
+    if isinstance(record, dict):
+        return record
+    return {
+        "model_id": model_id,
+        "model_status": "SAMPLE_BUILDING",
+        "sample_size": 0,
+        "paper_open_allowed": False,
+        "allowed_signal_grades": ["A_PLUS"],
+    }
+
+
+def _survival_gate_reason(trade: dict[str, Any], model_survival: dict[str, Any]) -> str | None:
+    model_id = str(trade.get("model_id") or trade.get("dominant_model_id") or "UNKNOWN")
+    grade = str(trade.get("signal_grade") or "D").upper()
+    record = _survival_record(model_survival, model_id)
+    trade["model_status"] = record.get("model_status")
+    trade["survival_filter"] = record
+    status = str(record.get("model_status") or "SAMPLE_BUILDING").upper()
+    allowed_grades = {str(item).upper() for item in (record.get("allowed_signal_grades") or [])}
+    if status == "SUPPRESSED_RESEARCH":
+        return "MODEL_NEGATIVE_EDGE_SUPPRESSED"
+    if status == "SAMPLE_BUILDING" and grade != "A_PLUS":
+        return "MODEL_SAMPLE_BUILDING_A_PLUS_ONLY"
+    if allowed_grades and grade not in allowed_grades:
+        return "MODEL_SURVIVAL_GRADE_NOT_ALLOWED"
+    if record.get("paper_open_allowed") is False and not allowed_grades:
+        return "MODEL_NEGATIVE_EDGE_SUPPRESSED"
+    return None
+
+
+def _setup_family_negative_edge_reason(trade: dict[str, Any], edge: dict[str, Any]) -> str | None:
+    family = str(trade.get("setup_family") or "UNKNOWN")
+    for group in edge.get("groups") or []:
+        if str(group.get("setup_family") or "UNKNOWN") != family:
+            continue
+        sample_size = int(group.get("sample_size") or 0)
+        winrate = safe_float(group.get("winrate"))
+        avg_r = safe_float(group.get("avg_r") or group.get("expectancy"))
+        if sample_size >= 10 and ((winrate is not None and winrate < 0.35) or (avg_r is not None and avg_r < -0.25)):
+            return "SETUP_FAMILY_NEGATIVE_EDGE_SUPPRESSED"
+    return None
+
 
 
 def _build_trade(
@@ -566,12 +690,11 @@ def _build_trade(
     grade = grade_signal_record(trade, activation_payload, timeframe_resolution)
     trade.update(grade)
     trade = enrich_trade_event_fields(trade, grade)
-    trade["valid_for_edge"] = False
     trade["execution_safety"] = {"live_order_sent": False, "private_api_used": False}
     edge_invalid = _edge_invalid(trade)
     required_issues = _required_field_issues(trade)
     trade["invalid_for_edge"] = bool(trade.get("invalid_for_edge")) or edge_invalid or bool(required_issues)
-    trade["valid_for_edge"] = False
+    trade["valid_for_edge"] = not bool(trade.get("invalid_for_edge"))
     trade["valid_for_lifecycle"] = not bool(required_issues)
     if edge_invalid:
         trade["reason_codes"] = sorted(set([*(trade.get("reason_codes") or []), "MISSING_TIMEFRAME_OR_RR"]))
@@ -642,6 +765,8 @@ def _compact_trade_snapshot(trade: dict[str, Any]) -> dict[str, Any]:
         "supporting_models",
         "supporting_setups",
         "execution_safety",
+        "model_status",
+        "survival_filter",
     )
     return {field: trade.get(field) for field in keep_fields if field in trade}
 
@@ -659,6 +784,8 @@ def run_paper_trade_factory() -> dict[str, Any]:
     business_zone = load_json(BUSINESS_ZONE_PATH) or {}
     atr = load_json(ATR_PATH) or {}
     timeframe_resolution = load_json(TIMEFRAME_RESOLUTION_PATH) or {}
+    model_survival = load_json(MODEL_SURVIVAL_FILTER_PATH) or {}
+    edge_matrix = load_json(RESEARCH_EDGE_MATRIX_PATH) or {}
     lifecycle, lifecycle_reason = safe_read_json(RESEARCH_LIFECYCLE_PATH, default={}, max_bytes=500_000)
     lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
 
@@ -684,6 +811,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
         open_by_event_id,
         open_context_directions,
         open_model_family_directions,
+        open_event_bucket_directions,
     ) = _lifecycle_open_state(lifecycle)
     pending_by_model_id: Counter[str] = Counter()
     pending_by_family_direction: Counter[str] = Counter()
@@ -692,6 +820,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
     pending_by_event_id: Counter[str] = Counter()
     pending_context_directions: dict[str, set[str]] = {}
     pending_model_family_directions: dict[str, set[str]] = {}
+    pending_event_bucket_directions: dict[str, set[str]] = {}
     allowed_research_band_counts: Counter[str] = Counter()
     paper_safety = {
         "max_new_trades_per_loop": NEW_TRADES_CAP_PER_LOOP,
@@ -710,6 +839,10 @@ def run_paper_trade_factory() -> dict[str, Any]:
         "blocked_by_event_limit": 0,
         "blocked_by_model_id_limit": 0,
         "blocked_by_new_trade_cap": 0,
+        "blocked_by_hard_entry_gate": 0,
+        "blocked_by_model_survival": 0,
+        "blocked_by_setup_family_negative_edge": 0,
+        "blocked_by_opposite_event_bucket": 0,
         "allowed_research_band_counts": {},
     }
 
@@ -750,6 +883,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
         family_direction_key = _family_direction_key(trade)
         setup_family_key = str(trade.get("setup_family") or "NO_ACTIVE_SETUP_FAMILY")
         event_id_key = str(trade.get("event_id") or derive_event_id(trade))
+        event_bucket_key = _event_bucket_key(trade)
         context_conflict_key = _context_contradiction_key(trade)
         model_family_context_key = _model_family_context_key(trade)
         direction = str(trade.get("direction") or "UNKNOWN").upper()
@@ -766,9 +900,26 @@ def run_paper_trade_factory() -> dict[str, Any]:
         seen_context_directions.update(pending_context_directions.get(context_conflict_key, set()))
         seen_model_family_directions = set(open_model_family_directions.get(model_family_context_key, set()))
         seen_model_family_directions.update(pending_model_family_directions.get(model_family_context_key, set()))
+        seen_event_bucket_directions = set(open_event_bucket_directions.get(event_bucket_key, set()))
+        seen_event_bucket_directions.update(pending_event_bucket_directions.get(event_bucket_key, set()))
 
         guard_reason = None
-        if any(existing != direction for existing in seen_context_directions if existing in {"LONG", "SHORT"}):
+        gate_reason = _hard_entry_gate_reason(trade)
+        survival_reason = _survival_gate_reason(trade, model_survival)
+        setup_negative_reason = _setup_family_negative_edge_reason(trade, edge_matrix)
+        if gate_reason:
+            paper_safety["blocked_by_hard_entry_gate"] += 1
+            guard_reason = gate_reason
+        elif survival_reason:
+            paper_safety["blocked_by_model_survival"] += 1
+            guard_reason = survival_reason
+        elif setup_negative_reason:
+            paper_safety["blocked_by_setup_family_negative_edge"] += 1
+            guard_reason = setup_negative_reason
+        elif any(existing != direction for existing in seen_event_bucket_directions if existing in {"LONG", "SHORT"}):
+            paper_safety["blocked_by_opposite_event_bucket"] += 1
+            guard_reason = "OPPOSITE_DIRECTION_EVENT_5M_BUCKET"
+        elif any(existing != direction for existing in seen_context_directions if existing in {"LONG", "SHORT"}):
             paper_safety["blocked_by_context_direction_conflict"] += 1
             guard_reason = "CONTEXT_DIRECTION_CONFLICT"
         elif any(existing != direction for existing in seen_model_family_directions if existing in {"LONG", "SHORT"}):
@@ -777,8 +928,6 @@ def run_paper_trade_factory() -> dict[str, Any]:
         elif total_open_after_pending >= MAX_OPEN_TOTAL:
             paper_safety["blocked_by_open_limit"] += 1
             guard_reason = "PAPER_OPEN_LIMIT_REACHED"
-        elif str(trade.get("signal_grade") or "D").upper() == "D":
-            guard_reason = "SIGNAL_GRADE_D_BLOCKED"
         elif new_trade_slots_used >= NEW_TRADES_CAP_PER_LOOP:
             paper_safety["blocked_by_new_trade_cap"] += 1
             guard_reason = "NEW_TRADES_CAP_PER_LOOP_REACHED"
@@ -800,6 +949,8 @@ def run_paper_trade_factory() -> dict[str, Any]:
 
         if guard_reason:
             trade["status"] = "BLOCKED"
+            trade["valid_for_lifecycle"] = False
+            trade["valid_for_edge"] = False
             trade["invalid_reason"] = guard_reason
             if guard_reason == "EVENT_ALREADY_OPEN":
                 trade["supporting_models"] = sorted(set([*(trade.get("supporting_models") or []), str(trade.get("model_id") or "UNKNOWN")]))
@@ -816,6 +967,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
         pending_by_event_id[event_id_key] += 1
         pending_context_directions.setdefault(context_conflict_key, set()).add(direction)
         pending_model_family_directions.setdefault(model_family_context_key, set()).add(direction)
+        pending_event_bucket_directions.setdefault(event_bucket_key, set()).add(direction)
         allowed_research_band_counts[str(trade.get("activation_band") or "UNKNOWN")] += 1
         trades.append(trade)
 
@@ -873,6 +1025,8 @@ def run_paper_trade_factory() -> dict[str, Any]:
                 "latest_business_zone": business_zone,
                 "latest_atr_state": atr,
                 "latest_timeframe_resolution": timeframe_resolution,
+                "latest_model_survival_filter": model_survival,
+                "latest_research_edge_matrix": edge_matrix,
                 "latest_research_paper_lifecycle": lifecycle,
             }.items() if not payload],
         },

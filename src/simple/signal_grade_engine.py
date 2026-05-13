@@ -54,6 +54,11 @@ def grade_signal_record(
     data_quality = _data_quality_level(setup, timeframe, edge, accounting)
     risk_tags = {str(item).upper() for item in (trade.get("risk_tags") or setup.get("risk_tags") or [])}
     reason_codes = {str(item).upper() for item in (trade.get("reason_codes") or [])}
+    liquidity_event = str(trade.get("liquidity_event") or "").upper()
+    structure_label = str(trade.get("structure_label") or "").upper()
+    direction_resolution = trade.get("direction_resolution") or setup.get("direction_resolution") or {}
+    resolution_mode = str(direction_resolution.get("resolution_mode") or "").upper()
+    direction_conflicts = direction_resolution.get("direction_conflicts") or []
 
     blockers: list[str] = []
     reasons: list[str] = []
@@ -63,16 +68,33 @@ def grade_signal_record(
         blockers.append("MISSING_TIMEFRAME")
     if rr1 is None or rr2 is None:
         blockers.append("MISSING_RR")
+    elif rr1 < 1.2 or rr2 < 2.0:
+        reasons.append("RR_BELOW_A_GATE")
+    if activation_score < 0.80:
+        reasons.append("ACTIVATION_SCORE_BELOW_A_GATE")
+    if confluence_count < 2:
+        reasons.append("EVENT_CONFLUENCE_LT_2")
+    if liquidity_event in {"", "UNKNOWN", "NONE", "NO_EVENT"}:
+        reasons.append("LIQUIDITY_EVENT_MISSING")
+    if structure_label in {"", "UNKNOWN", "NONE", "NO_STRUCTURE"}:
+        reasons.append("STRUCTURE_LABEL_MISSING")
     if data_quality not in {"HIGH", "MEDIUM"}:
         blockers.append("DATA_QUALITY_LOW")
-    if "HARD_DIRECTION_CONFLICT" in risk_tags or "DIRECTION_CONFLICT" in reason_codes:
+    if (
+        "HARD_DIRECTION_CONFLICT" in risk_tags
+        or "DIRECTION_CONFLICT" in reason_codes
+        or "SEMANTIC_CONTRADICTION" in reason_codes
+        or resolution_mode == "NEUTRAL_HARD_CONFLICT"
+    ):
         blockers.append("HARD_DIRECTION_CONFLICT")
+    if direction_conflicts and int(direction_resolution.get("conflict_count") or len(direction_conflicts)) >= 2:
+        blockers.append("MTF_ALIGNMENT_CONTRADICTORY")
     if bool(trade.get("execution_safety", {}).get("live_order_sent")) or bool(trade.get("live_order_sent")):
         blockers.append("LIVE_ORDER_SENT_TRUE")
 
     if activation_score >= 0.85:
         reasons.append("ACTIVATION_SCORE_A_PLUS")
-    elif activation_score >= 0.75:
+    elif activation_score >= 0.80:
         reasons.append("ACTIVATION_SCORE_A")
     elif activation_score >= 0.60:
         reasons.append("ACTIVATION_SCORE_B")
@@ -95,7 +117,7 @@ def grade_signal_record(
         grade = "D"
     elif activation_score >= 0.85 and (rr1 or 0.0) >= 1.2 and (rr2 or 0.0) >= 2.0 and primary_tf and context_tf and confluence_count >= 2:
         grade = "A_PLUS"
-    elif activation_score >= 0.75 and (rr1 or 0.0) >= 1.0 and (rr2 or 0.0) >= 1.8 and (primary_tf or trigger_tf) and _direction_valid(direction):
+    elif activation_score >= 0.80 and (rr1 or 0.0) >= 1.2 and (rr2 or 0.0) >= 2.0 and primary_tf and context_tf and confluence_count >= 2 and _direction_valid(direction):
         grade = "A"
     elif activation_score >= 0.60 and (rr1 or 0.0) >= 1.0 and _direction_valid(direction):
         grade = "B"

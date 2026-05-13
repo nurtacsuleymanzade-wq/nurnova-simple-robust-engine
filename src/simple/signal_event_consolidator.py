@@ -133,8 +133,13 @@ def run_signal_event_consolidator() -> dict[str, Any]:
     for trade in factory.get("newest_opened_this_loop") or factory.get("top_candidate_diagnostics") or []:
         trades.append(enrich_trade_event_fields(dict(trade), grade_map.get(str(trade.get("paper_trade_id") or ""))))
     grouped: dict[str, list[dict[str, Any]]] = {}
+    bucket_directions: dict[str, set[str]] = {}
     for trade in trades:
         grouped.setdefault(str(trade.get("event_id")), []).append(trade)
+        bucket_key = "|".join([str(trade.get("symbol") or "UNKNOWN"), str(trade.get("event_bucket_5m") or "UNKNOWN_BUCKET")])
+        direction = str(trade.get("direction") or "UNKNOWN").upper()
+        if direction in {"LONG", "SHORT"}:
+            bucket_directions.setdefault(bucket_key, set()).add(direction)
     events = [_merge_event(items) for items in grouped.values() if items]
     events.sort(key=lambda item: (safe_float(item.get("grade_score")) or 0.0, int(item.get("event_confluence_count") or 0)), reverse=True)
     output = stamp_payload(
@@ -147,10 +152,11 @@ def run_signal_event_consolidator() -> dict[str, Any]:
                 "source_trade_count": len(trades),
                 "event_count": len(events),
                 "duplicate_event_count": max(0, len(trades) - len(events)),
+                "opposite_direction_bucket_count": sum(1 for values in bucket_directions.values() if len(values) > 1),
                 "a_plus_event_count": sum(1 for item in events if item.get("a_plus_ready") and item.get("signal_grade") == "A_PLUS"),
             },
             "data_quality": {"level": "HIGH" if factory else "MEDIUM", "missing_inputs": [name for name, payload in {"paper_trade_factory": factory, "signal_grade": grade_payload}.items() if not payload]},
-            "reason_codes": ["EVENT_LEVEL_SIGNAL_IDENTITY_ACTIVE", "ONE_TELEGRAM_SIGNAL_PER_EVENT", "PAPER_ONLY", "NO_LIVE_EXECUTION", "NO_PRIVATE_API"],
+            "reason_codes": ["EVENT_LEVEL_SIGNAL_IDENTITY_ACTIVE", "ONE_TELEGRAM_SIGNAL_PER_EVENT", "OPPOSITE_BUCKET_AUDIT_ACTIVE", "PAPER_ONLY", "NO_LIVE_EXECUTION", "NO_PRIVATE_API"],
             "feeds_next": ["TELEGRAM_RESEARCH_REPORTER", "RESEARCH_PAPER_LIFECYCLE_ENGINE"],
             "execution_safety": {"safe_to_open_real_trade": False, "private_api_used": False, "live_order_sent": False},
         },

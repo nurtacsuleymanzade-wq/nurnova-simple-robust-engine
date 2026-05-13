@@ -20,6 +20,7 @@ FACTORY_PATH = epoch_state_path("latest_paper_trade_factory.json")
 LIFECYCLE_PATH = epoch_state_path("latest_research_paper_lifecycle.json")
 ACCOUNTING_PATH = epoch_state_path("latest_outcome_accounting.json")
 EDGE_PATH = epoch_state_path("latest_research_edge_matrix.json")
+MODEL_SURVIVAL_PATH = epoch_state_path("latest_model_survival_filter.json")
 EVENT_PATH = epoch_state_path("latest_signal_event.json")
 GRADE_PATH = epoch_state_path("latest_signal_grade.json")
 CONTRACT_PATH = epoch_state_path("latest_signal_data_contract.json")
@@ -190,14 +191,25 @@ def _instant_signal_message(event: dict[str, Any], edge: dict[str, Any]) -> str:
     )
 
 
-def _summary_message(factory: dict[str, Any], lifecycle: dict[str, Any], accounting: dict[str, Any], edge: dict[str, Any], event_payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def _summary_message(factory: dict[str, Any], lifecycle: dict[str, Any], accounting: dict[str, Any], edge: dict[str, Any], event_payload: dict[str, Any], survival: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
     active = _active_setup(factory, lifecycle, edge)
     latest_event = event_payload.get("latest_event") or {}
     lifecycle_summary = lifecycle.get("summary") or {}
     accounting_summary = accounting.get("summary") or {}
     edge_summary = edge.get("summary") or {}
+    survival = survival or {}
+    survival_summary = survival.get("summary") or {}
     best_winrate_model = edge.get("best_winrate_model") or {}
     best_avg_r_model = edge.get("best_avg_r_model") or {}
+    worst_model = edge.get("worst_model") or {}
+    suppressed_models = list(survival_summary.get("suppressed_models") or [])
+    promising_models = list(survival_summary.get("promising_models") or [])
+    if suppressed_models:
+        current_gate = "suppressed"
+    elif survival_summary.get("model_count") and not promising_models:
+        current_gate = "A+ only"
+    else:
+        current_gate = "A+ and A"
     payload = {
         "epoch_id": ACTIVE_EPOCH_ID,
         "pair": factory.get("symbol") or lifecycle.get("symbol") or latest_event.get("symbol") or "BTCUSDT",
@@ -213,43 +225,34 @@ def _summary_message(factory: dict[str, Any], lifecycle: dict[str, Any], account
         "average_r": accounting_summary.get("avg_r"),
         "edge_status": edge.get("edge_status") or "NO_CLEAN_SAMPLES",
         "best_model": edge_summary.get("best_model_id") or (best_avg_r_model.get("model_id") or active["model_id"]),
+        "worst_model": worst_model.get("model_id") or "n/a",
+        "suppressed_models": suppressed_models,
+        "promising_models": promising_models,
+        "current_gate": current_gate,
         "best_model_winrate": best_winrate_model.get("winrate") if best_winrate_model else edge_summary.get("best_winrate"),
         "best_model_avg_r": best_avg_r_model.get("avg_r") if best_avg_r_model else edge_summary.get("best_expectancy"),
         "sample_count": int(edge_summary.get("best_sample_size") or accounting_summary.get("clean_sample_count") or 0),
         "live_trade": "OFF",
     }
     lines = [
-        "NURNOVA 15M REPORT",
+        "NURNOVA EDGE REPORT 15M",
         "",
-        f"Epoch: {ACTIVE_EPOCH_ID}",
-        f"Pair: {payload['pair']}",
-        "",
-        "Research Status:",
-        f"Open Trades: {payload['open_trades']}",
-        f"Closed Trades: {payload['closed_trades']}",
-        f"TP Hits: {payload['tp_hits']}",
-        f"SL Hits: {payload['sl_hits']}",
+        f"Open: {payload['open_trades']}",
+        f"Closed: {payload['closed_trades']}",
+        f"TP: {payload['tp_hits']}",
+        f"SL: {payload['sl_hits']}",
         f"Expired: {payload['expired']}",
         f"Winrate: {_format_percent(payload['winrate'])}",
         f"Average R: {_format_number(payload['average_r'])}",
         f"Edge Status: {payload['edge_status']}",
         "",
         f"Best Model: {payload['best_model']}",
-        f"Best Model Winrate: {_format_percent(payload['best_model_winrate'])}",
-        f"Best Model Avg R: {_format_number(payload['best_model_avg_r'])}",
-        f"Best Model Sample Count: {payload['sample_count']}",
+        f"Worst Model: {payload['worst_model']}",
+        f"Suppressed Models: {', '.join(suppressed_models) if suppressed_models else 'none'}",
+        f"Promising Models: {', '.join(promising_models) if promising_models else 'none'}",
         "",
-        f"Current Active Setup: {latest_event.get('primary_setup') or payload['active_setup']}",
-        f"Primary TF: {payload['primary_tf']}",
-        f"Context TF: {payload['context_tf']}",
-        "",
-        "System:",
-        "Pipeline: EPOCH_V2",
-        "Sync: EPOCH_V2_SSOT",
+        f"Current Gate: {payload['current_gate']}",
         "Live Trade OFF",
-        "",
-        "Source:",
-        "All metrics from EPOCH_V2_SSOT.",
     ]
     return "\n".join(lines), payload
 
@@ -260,6 +263,7 @@ def run_reporter(mode: str) -> dict[str, Any]:
     lifecycle = load_json(LIFECYCLE_PATH) or {}
     accounting = load_json(ACCOUNTING_PATH) or {}
     edge = load_json(EDGE_PATH) or {}
+    survival = load_json(MODEL_SURVIVAL_PATH) or {}
     event_payload = load_json(EVENT_PATH) or {}
     grade = load_json(GRADE_PATH) or {}
     contract = load_json(CONTRACT_PATH) or {}
@@ -293,7 +297,7 @@ def run_reporter(mode: str) -> dict[str, Any]:
             messages = []
             dedup_suppressed = 1
         else:
-            text, summary_payload = _summary_message(factory, lifecycle, accounting, edge, event_payload)
+            text, summary_payload = _summary_message(factory, lifecycle, accounting, edge, event_payload, survival)
             digest = _hash_payload(summary_payload)
             if digest != _load_summary_hash():
                 _write_summary_hash(digest, text)
@@ -337,9 +341,10 @@ def run_reporter(mode: str) -> dict[str, Any]:
                 "research_paper_lifecycle": str(LIFECYCLE_PATH),
                 "outcome_accounting": str(ACCOUNTING_PATH),
                 "research_edge_matrix": str(EDGE_PATH),
+                "model_survival_filter": str(MODEL_SURVIVAL_PATH),
             },
             "status": rate_limit_status if mode == "summary" and rate_limit_status == "SUPPRESSED_15M_RATE_LIMIT" else status if messages else ("SUPPRESSED_DUPLICATE" if dedup_suppressed else "NO_MESSAGES"),
-            "summary": (_summary_message(factory, lifecycle, accounting, edge, event_payload)[1] if mode == "summary" else None),
+            "summary": (_summary_message(factory, lifecycle, accounting, edge, event_payload, survival)[1] if mode == "summary" else None),
             "message_count": len(messages),
             "dedup_suppressed_count": dedup_suppressed,
             "rate_limit_status": rate_limit_status,
@@ -362,6 +367,7 @@ def run_reporter(mode: str) -> dict[str, Any]:
                         "epoch_v2/latest_research_paper_lifecycle.json": lifecycle,
                         "epoch_v2/latest_outcome_accounting.json": accounting,
                         "epoch_v2/latest_research_edge_matrix.json": edge,
+                        "epoch_v2/latest_model_survival_filter.json": survival,
                         "epoch_v2/latest_signal_event.json": event_payload,
                         "epoch_v2/latest_signal_grade.json": grade,
                         "epoch_v2/latest_signal_data_contract.json": contract,
