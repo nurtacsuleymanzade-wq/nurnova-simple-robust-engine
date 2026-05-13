@@ -42,6 +42,13 @@ _STAGES: list[tuple[str, str, str]] = [
     # --- Flow katmani (S13-S15) ---
     ("src.simple.flow_evidence_engine",           "NOARG",           "S13_FLOW_EVIDENCE"),
     ("src.simple.flow_persistence_engine",        "NOARG",           "S14_FLOW_PERSISTENCE"),
+    ("src.simple.observation_factory",            "NOARG",           "OBSERVATION_FACTORY"),
+    ("src.simple.mtf_candle_dna_factory",         "NOARG",           "MTF_CANDLE_DNA_FACTORY"),
+    ("src.simple.atr_engine",                     "NOARG",           "ATR_ENGINE"),
+    ("src.simple.market_structure_engine",        "NOARG",           "MARKET_STRUCTURE_ENGINE"),
+    ("src.simple.liquidity_map_engine",           "NOARG",           "LIQUIDITY_MAP_ENGINE"),
+    ("src.simple.interpretation_engine",          "NOARG",           "INTERPRETATION_ENGINE"),
+    ("src.simple.three_scenario_engine",          "NOARG",           "THREE_SCENARIO_ENGINE"),
     ("src.simple.flow_to_setup_context_engine",   "NOARG",           "S15_FLOW_TO_SETUP_CONTEXT"),
     # --- Model layer (after S15, before S16) ---
     ("src.simple.absorption_reversal_engine",     "NOARG",           "AR01_ABSORPTION_REVERSAL"),
