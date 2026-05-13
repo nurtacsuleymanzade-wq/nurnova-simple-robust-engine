@@ -227,6 +227,11 @@ def _normalize_cmdline(value: object) -> str:
     return str(value or "").strip()
 
 
+def _is_run_loop_cmdline(cmdline: object) -> bool:
+    normalized = _normalize_cmdline(cmdline)
+    return "run_loop.py" in normalized or "src.simple.run_loop" in normalized
+
+
 def _is_ignored_duplicate_candidate(process: dict[str, Any]) -> bool:
     cmdline = f" {_normalize_cmdline(process.get('cmdline')).lower()} "
     return any(pattern in cmdline for pattern in IGNORED_DUPLICATE_CMDLINE_PATTERNS)
@@ -290,29 +295,83 @@ def _filter_duplicate_processes(
     detected_processes: list[dict[str, Any]],
     *,
     relation_processes: list[dict[str, Any]] | None = None,
+    runtime_lock_pid: int = 0,
 ) -> list[dict[str, Any]]:
+    filtered, _metadata = _classify_duplicate_processes(
+        detected_processes,
+        relation_processes=relation_processes,
+        runtime_lock_pid=runtime_lock_pid,
+    )
+    return filtered
+
+
+def _classify_duplicate_processes(
+    detected_processes: list[dict[str, Any]],
+    *,
+    relation_processes: list[dict[str, Any]] | None = None,
+    runtime_lock_pid: int = 0,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     current_pid = os.getpid()
     process_index = _build_process_index(relation_processes or detected_processes)
-    filtered: list[dict[str, Any]] = []
+    scanned_pids: list[int] = []
+    ignored_child_pids: list[int] = []
     seen_pids: set[int] = set()
+    filtered: list[dict[str, Any]] = []
+    ignored_self_pid = 0
+    ignored_lock_pid = 0
+
     for process in detected_processes:
         pid = int(process.get("pid") or 0)
-        if pid <= 0 or pid == current_pid:
+        if pid > 0:
+            scanned_pids.append(pid)
+        if pid <= 0:
             continue
+
+        cmdline = _normalize_cmdline(process.get("cmdline"))
+        if not _is_run_loop_cmdline(cmdline):
+            continue
+
+        if pid == current_pid:
+            ignored_self_pid = current_pid
+            if runtime_lock_pid == current_pid:
+                ignored_lock_pid = current_pid
+            continue
+
         if pid in seen_pids:
             continue
-        if _is_ignored_duplicate_candidate(process):
+
+        if not _pid_alive(pid):
             continue
-        if _is_parent_child_related(pid, current_pid, process_index):
+
+        helper_or_related = (
+            _is_ignored_duplicate_candidate(process)
+            or _is_parent_child_related(pid, current_pid, process_index)
+        )
+        if helper_or_related:
+            ignored_child_pids.append(pid)
+            if runtime_lock_pid == pid:
+                ignored_lock_pid = pid
             continue
+
         seen_pids.add(pid)
         filtered.append({
             "pid": pid,
             "parent_pid": int(process.get("parent_pid") or 0),
-            "cmdline": _normalize_cmdline(process.get("cmdline")),
+            "cmdline": cmdline,
             "source": process.get("source", "process_scan"),
         })
-    return filtered
+
+    metadata = {
+        "current_pid": current_pid,
+        "runtime_lock_pid": int(runtime_lock_pid or 0),
+        "scanned_pids": scanned_pids,
+        "ignored_self_pid": ignored_self_pid,
+        "ignored_lock_pid": ignored_lock_pid,
+        "ignored_child_pids": sorted(set(ignored_child_pids)),
+        "true_duplicate_pids": [int(process.get("pid") or 0) for process in filtered],
+        "duplicate_loop_detected": bool(filtered),
+    }
+    return filtered, metadata
 
 
 def _scan_child_processes() -> tuple[list[dict], list[str]]:
@@ -406,15 +465,24 @@ def _write_runtime_topology_report(
     duplicate_processes: list[dict],
     process_scan_errors: list[str],
     lock_status: str,
+    topology_snapshot: dict[str, Any] | None = None,
 ) -> None:
     child_processes, child_scan_errors = _scan_child_processes()
+    topology_snapshot = dict(topology_snapshot or {})
     report = {
         "timestamp_utc": utc_now(),
         "canonical_runtime": CANONICAL_RUNTIME,
+        "current_pid": int(topology_snapshot.get("current_pid") or os.getpid()),
         "runtime_pid": os.getpid(),
+        "runtime_lock_pid": int(topology_snapshot.get("runtime_lock_pid") or 0),
         "runtime_lock": str(LOCK_PATH),
         "lock_status": lock_status,
         "loop": cycle,
+        "scanned_pids": list(topology_snapshot.get("scanned_pids") or []),
+        "ignored_self_pid": int(topology_snapshot.get("ignored_self_pid") or 0),
+        "ignored_lock_pid": int(topology_snapshot.get("ignored_lock_pid") or 0),
+        "ignored_child_pids": list(topology_snapshot.get("ignored_child_pids") or []),
+        "true_duplicate_pids": list(topology_snapshot.get("true_duplicate_pids") or []),
         "child_processes": child_processes,
         "child_process_scan_errors": child_scan_errors,
         "subprocess_usage": _subprocess_usage_report(),
@@ -435,14 +503,20 @@ def _write_runtime_topology_report(
 def _acquire_runtime_lock() -> tuple[bool, dict]:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     current_pid = os.getpid()
-    detected_processes, process_scan_errors = _scan_run_loop_processes()
-    duplicate_processes = _filter_duplicate_processes(detected_processes)
-    duplicate_loop_detected = bool(duplicate_processes)
-    duplicate_loop_fixed = False
 
     existing_lock = _read_json(LOCK_PATH)
     existing_pid = int(existing_lock.get("pid") or 0)
     existing_lock_age_seconds = _read_lock_age_seconds(existing_lock)
+    initial_lock_pid = existing_pid if existing_pid > 0 else current_pid
+    detected_processes, process_scan_errors = _scan_run_loop_processes()
+    duplicate_processes, topology_snapshot = _classify_duplicate_processes(
+        detected_processes,
+        runtime_lock_pid=initial_lock_pid,
+    )
+    initial_topology_snapshot = dict(topology_snapshot)
+    duplicate_loop_detected = bool(duplicate_processes)
+    duplicate_loop_fixed = False
+
     if existing_pid and existing_pid != current_pid:
         lock_pid_seen = any(existing_pid == int(process.get("pid") or 0) for process in detected_processes)
         lock_is_stale = bool(existing_lock_age_seconds is not None and existing_lock_age_seconds > LOCK_STALE_SECONDS)
@@ -461,10 +535,22 @@ def _acquire_runtime_lock() -> tuple[bool, dict]:
             except FileNotFoundError:
                 pass
 
-    duplicate_processes = _filter_duplicate_processes(
+    duplicate_processes, normalized_snapshot = _classify_duplicate_processes(
         duplicate_processes,
         relation_processes=[*detected_processes, *duplicate_processes],
+        runtime_lock_pid=initial_lock_pid,
     )
+    topology_snapshot = {
+        **initial_topology_snapshot,
+        **normalized_snapshot,
+        "scanned_pids": list(initial_topology_snapshot.get("scanned_pids") or []),
+        "ignored_self_pid": int(initial_topology_snapshot.get("ignored_self_pid") or normalized_snapshot.get("ignored_self_pid") or 0),
+        "ignored_lock_pid": int(initial_topology_snapshot.get("ignored_lock_pid") or normalized_snapshot.get("ignored_lock_pid") or 0),
+        "ignored_child_pids": sorted(
+            set(initial_topology_snapshot.get("ignored_child_pids") or [])
+            | set(normalized_snapshot.get("ignored_child_pids") or [])
+        ),
+    }
     duplicate_loop_detected = bool(duplicate_processes)
 
     if duplicate_loop_detected:
@@ -475,12 +561,14 @@ def _acquire_runtime_lock() -> tuple[bool, dict]:
             duplicate_processes=duplicate_processes,
             process_scan_errors=process_scan_errors,
             lock_status="ABORTED_DUPLICATE_RUNTIME",
+            topology_snapshot=topology_snapshot,
         )
         return False, {
             "duplicate_loop_detected": True,
             "duplicate_loop_fixed": duplicate_loop_fixed,
             "duplicate_processes": duplicate_processes,
             "process_scan_errors": process_scan_errors,
+            "topology_snapshot": topology_snapshot,
         }
 
     lock_payload = {
@@ -494,6 +582,12 @@ def _acquire_runtime_lock() -> tuple[bool, dict]:
     try:
         fd = os.open(str(LOCK_PATH), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     except FileExistsError:
+        race_snapshot = {
+            **topology_snapshot,
+            "runtime_lock_pid": existing_pid if existing_pid > 0 else current_pid,
+            "duplicate_loop_detected": True,
+            "true_duplicate_pids": [existing_pid] if existing_pid > 0 else [],
+        }
         _write_runtime_topology_report(
             cycle=0,
             duplicate_loop_detected=True,
@@ -501,12 +595,14 @@ def _acquire_runtime_lock() -> tuple[bool, dict]:
             duplicate_processes=[{"pid": existing_pid, "source": "runtime_loop.lock"}],
             process_scan_errors=process_scan_errors,
             lock_status="ABORTED_LOCK_RACE",
+            topology_snapshot=race_snapshot,
         )
         return False, {
             "duplicate_loop_detected": True,
             "duplicate_loop_fixed": duplicate_loop_fixed,
             "duplicate_processes": [{"pid": existing_pid, "source": "runtime_loop.lock"}],
             "process_scan_errors": process_scan_errors,
+            "topology_snapshot": race_snapshot,
         }
 
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -517,6 +613,13 @@ def _acquire_runtime_lock() -> tuple[bool, dict]:
         "duplicate_loop_fixed": duplicate_loop_fixed,
         "duplicate_processes": [],
         "process_scan_errors": process_scan_errors,
+        "topology_snapshot": {
+            **topology_snapshot,
+            "runtime_lock_pid": current_pid,
+            "ignored_lock_pid": current_pid if int(topology_snapshot.get("ignored_self_pid") or 0) == current_pid else int(topology_snapshot.get("ignored_lock_pid") or 0),
+            "duplicate_loop_detected": False,
+            "true_duplicate_pids": [],
+        },
     }
 
 
@@ -844,6 +947,7 @@ def main() -> None:
                 duplicate_processes=list(topology.get("duplicate_processes") or []),
                 process_scan_errors=list(topology.get("process_scan_errors") or []),
                 lock_status="RUNNING",
+                topology_snapshot=dict(topology.get("topology_snapshot") or {}),
             )
             _refresh_runtime_lock()
 
@@ -863,6 +967,7 @@ def main() -> None:
             duplicate_processes=list(topology.get("duplicate_processes") or []),
             process_scan_errors=list(topology.get("process_scan_errors") or []),
             lock_status="STOPPED",
+            topology_snapshot=dict(topology.get("topology_snapshot") or {}),
         )
         _release_runtime_lock()
         print(
