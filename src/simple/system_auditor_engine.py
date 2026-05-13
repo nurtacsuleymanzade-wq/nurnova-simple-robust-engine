@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from src.simple.research_epoch import epoch_data_path, epoch_state_path
 from src.simple.research_runtime import current_runtime_context, history_tail, load_json, stamp_payload, write_json
 
 BLOCK_ID = "SYSTEM_AUDITOR_ENGINE"
@@ -13,9 +14,10 @@ DATA_DIR = Path("data/simple")
 OUTPUT_PATH = STATE_DIR / "latest_system_audit.json"
 
 SYNC_PATH = STATE_DIR / "latest_context_sync.json"
-PAPER_FACTORY_PATH = STATE_DIR / "latest_paper_trade_factory.json"
-LIFECYCLE_PATH = STATE_DIR / "latest_research_paper_lifecycle.json"
-EDGE_PATH = STATE_DIR / "latest_research_edge_matrix.json"
+PAPER_FACTORY_PATH = epoch_state_path("latest_paper_trade_factory.json")
+LIFECYCLE_PATH = epoch_state_path("latest_research_paper_lifecycle.json")
+ACCOUNTING_PATH = epoch_state_path("latest_outcome_accounting.json")
+EDGE_PATH = epoch_state_path("latest_research_edge_matrix.json")
 LIVE_GATE_PATH = STATE_DIR / "latest_live_eligibility_gate.json"
 
 REQUIRED_STATE_FILES = {
@@ -27,6 +29,7 @@ REQUIRED_STATE_FILES = {
     "latest_setup_family_activation.json": STATE_DIR / "latest_setup_family_activation.json",
     "latest_paper_trade_factory.json": PAPER_FACTORY_PATH,
     "latest_research_paper_lifecycle.json": LIFECYCLE_PATH,
+    "latest_outcome_accounting.json": ACCOUNTING_PATH,
     "latest_research_edge_matrix.json": EDGE_PATH,
     "latest_model_feedback.json": STATE_DIR / "latest_model_feedback.json",
     "latest_model_promotion.json": STATE_DIR / "latest_model_promotion.json",
@@ -81,6 +84,7 @@ def run_system_auditor_engine() -> dict[str, Any]:
     sync = load_json(SYNC_PATH) or {}
     paper_factory = load_json(PAPER_FACTORY_PATH) or {}
     lifecycle = load_json(LIFECYCLE_PATH) or {}
+    accounting = load_json(ACCOUNTING_PATH) or {}
     edge = load_json(EDGE_PATH) or {}
     live_gate = load_json(LIVE_GATE_PATH) or {}
 
@@ -151,7 +155,7 @@ def run_system_auditor_engine() -> dict[str, Any]:
     if any(trade.get("outcome_status") == "CLOSED" and not trade.get("r_result") and trade.get("close_reason") != "PRICE_MISSING" for trade in closed_trades):
         warnings.append("CLOSED_WITHOUT_OUTCOME")
 
-    clean_samples = int((edge.get("summary") or {}).get("clean_sample_count") or 0)
+    clean_samples = int((accounting.get("summary") or {}).get("clean_sample_count") or 0)
     if edge.get("groups") and clean_samples == 0:
         critical_issues.append("EDGE_WITHOUT_CLEAN_SAMPLE")
     if any((group.get("sample_size") or 0) < 20 and group.get("edge_status") not in {"SAMPLE_BUILDING"} for group in (edge.get("groups") or [])):
@@ -167,7 +171,7 @@ def run_system_auditor_engine() -> dict[str, Any]:
         critical_issues.append("PRIVATE_API_VIOLATION")
 
     warnings.extend(_history_file_size_risk())
-    if history_tail(DATA_DIR / "research_paper_lifecycle_history.jsonl", max_lines=5) == []:
+    if history_tail(epoch_data_path("research_paper_lifecycle_history.jsonl"), max_lines=5) == []:
         warnings.append("HISTORY_TAIL_EMPTY")
     if len(open_trades) > 15:
         warnings.append("MEMORY_RISK_OPEN_TRADES_HIGH")

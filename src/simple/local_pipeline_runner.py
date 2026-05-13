@@ -50,9 +50,12 @@ _ACTIVE_CHAIN_STAGES: list[tuple[str, str, str]] = [
     ("src.simple.model_cluster_engine", "NOARG", "MODEL_CLUSTER_ENGINE"),
     ("src.simple.model_cooldown_engine", "NOARG", "MODEL_COOLDOWN_ENGINE"),
     ("src.simple.setup_family_activation_engine", "NOARG", "SETUP_FAMILY_ACTIVATION_ENGINE"),
+    ("src.simple.timeframe_resolver", "NOARG", "TIMEFRAME_RESOLVER"),
     ("src.simple.paper_trade_factory", "NOARG", "PAPER_TRADE_FACTORY"),
     ("src.simple.research_paper_lifecycle_engine", "NOARG", "RESEARCH_PAPER_LIFECYCLE_ENGINE"),
+    ("src.simple.outcome_accounting_engine", "NOARG", "OUTCOME_ACCOUNTING_ENGINE"),
     ("src.simple.research_edge_matrix_engine", "NOARG", "RESEARCH_EDGE_MATRIX_ENGINE"),
+    ("src.simple.telegram_research_reporter", "SUMMARY_REPORT", "TELEGRAM_RESEARCH_REPORTER"),
     ("src.simple.model_feedback_diagnostic", "NOARG", "MODEL_FEEDBACK_DIAGNOSTIC"),
     ("src.simple.model_promotion_engine", "NOARG", "MODEL_PROMOTION_ENGINE"),
     ("src.simple.live_eligibility_gate", "NOARG", "LIVE_ELIGIBILITY_GATE_DIAGNOSTIC"),
@@ -76,7 +79,7 @@ _LEGACY_BRIDGE_STAGES: list[tuple[str, str, str]] = [
     ("src.simple.simple_brain_report_engine", "run_fake_sample", "S10_SIMPLE_BRAIN_REPORT"),
 ]
 
-_STAGES = [*_ACTIVE_CHAIN_STAGES, *_LEGACY_BRIDGE_STAGES]
+_STAGES = list(_ACTIVE_CHAIN_STAGES)
 
 
 def _utc_now() -> str:
@@ -176,6 +179,16 @@ def _run_noarg_stage(module_path: str) -> tuple[dict[str, Any] | None, float, st
         return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
 
 
+def _run_summary_report_stage(module_path: str) -> tuple[dict[str, Any] | None, float, str | None]:
+    t0 = time.monotonic()
+    try:
+        mod = importlib.import_module(module_path)
+        result: dict[str, Any] = mod.run_summary_report()
+        return result, round((time.monotonic() - t0) * 1000, 1), None
+    except Exception as exc:
+        return None, round((time.monotonic() - t0) * 1000, 1), str(exc)
+
+
 def _persist_stage_output(module_path: str, output: dict[str, Any], symbol: str, context: dict[str, Any]) -> dict[str, Any]:
     stamped = stamp_payload(output, str(output.get("block_id") or module_path.rsplit(".", 1)[-1].upper()), symbol, context)
     try:
@@ -225,6 +238,8 @@ def run_pipeline(symbol: str, source_mode: str = "LIVE") -> dict[str, Any]:
             output, runtime_ms, exc_str = _run_noarg_main_stage(module_path)
         elif func_name == "NOARG":
             output, runtime_ms, exc_str = _run_noarg_stage(module_path)
+        elif func_name == "SUMMARY_REPORT":
+            output, runtime_ms, exc_str = _run_summary_report_stage(module_path)
         else:
             output, runtime_ms, exc_str = _run_stage(module_path, func_name, symbol)
 

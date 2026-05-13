@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from src.simple.research_epoch import epoch_state_path
 from src.simple.research_runtime import append_jsonl, current_runtime_context, load_json, safe_float, stamp_payload, write_json
 
 BLOCK_ID = "MODEL_PROMOTION_ENGINE"
@@ -10,7 +11,7 @@ STATE_DIR = Path("state/simple")
 DATA_DIR = Path("data/simple")
 OUTPUT_PATH = STATE_DIR / "latest_model_promotion.json"
 HISTORY_PATH = DATA_DIR / "model_promotion_history.jsonl"
-EDGE_PATH = STATE_DIR / "latest_research_edge_matrix.json"
+EDGE_PATH = epoch_state_path("latest_research_edge_matrix.json")
 FEEDBACK_PATH = STATE_DIR / "latest_model_feedback.json"
 
 

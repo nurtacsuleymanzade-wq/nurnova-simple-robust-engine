@@ -18,6 +18,7 @@ from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parent
 STATE_DIR = ROOT / "state" / "simple"
+EPOCH_STATE_DIR = STATE_DIR / "epoch_v2"
 DATA_DIR = ROOT / "data" / "simple"
 CANONICAL_RUNTIME = "run_loop.py"
 LOCK_PATH = STATE_DIR / "runtime_loop.lock"
@@ -776,8 +777,9 @@ def print_summary(data: dict, cycle: int) -> None:
     dq = data.get("data_quality", {})
     sync = _read_json(STATE_DIR / "latest_context_sync.json")
     setup_activation = _read_json(STATE_DIR / "latest_setup_family_activation.json")
-    research_lifecycle = _read_json(STATE_DIR / "latest_research_paper_lifecycle.json")
-    research_edge = _read_json(STATE_DIR / "latest_research_edge_matrix.json")
+    research_lifecycle = _read_json(EPOCH_STATE_DIR / "latest_research_paper_lifecycle.json")
+    outcome_accounting = _read_json(EPOCH_STATE_DIR / "latest_outcome_accounting.json")
+    research_edge = _read_json(EPOCH_STATE_DIR / "latest_research_edge_matrix.json")
     feedback = _read_json(STATE_DIR / "latest_model_feedback.json")
     promotion = _read_json(STATE_DIR / "latest_model_promotion.json")
     live_gate = _read_json(STATE_DIR / "latest_live_eligibility_gate.json")
@@ -853,7 +855,7 @@ def print_summary(data: dict, cycle: int) -> None:
         f"closed={lifecycle_summary.get('closed', 0)} "
         f"invalid={lifecycle_summary.get('invalid', 0)}"
     )
-    paper_safety = (_read_json(STATE_DIR / "latest_paper_trade_factory.json").get("paper_safety") or {})
+    paper_safety = (_read_json(EPOCH_STATE_DIR / "latest_paper_trade_factory.json").get("paper_safety") or {})
     print(
         f"PAPER_SAFE : conflict_blocked={paper_safety.get('blocked_by_context_direction_conflict', 0)} "
         f"open_limit_blocked={paper_safety.get('blocked_by_open_limit', 0)} "
@@ -861,7 +863,7 @@ def print_summary(data: dict, cycle: int) -> None:
     )
     print(
         f"EDGE : status={research_edge.get('edge_status', 'NO_CLOSED_SAMPLES')} "
-        f"samples={(research_edge.get('summary') or {}).get('clean_sample_count', 0)} "
+        f"samples={(outcome_accounting.get('summary') or {}).get('clean_sample_count', 0)} "
         f"best={(research_edge.get('summary') or {}).get('best_model_id', 'UNKNOWN')} "
         f"expectancy={_fmt_value((research_edge.get('summary') or {}).get('best_expectancy'))}"
     )

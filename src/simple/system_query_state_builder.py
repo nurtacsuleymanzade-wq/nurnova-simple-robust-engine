@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from src.simple.research_epoch import epoch_state_path
 from src.simple.research_runtime import current_runtime_context, load_json, stamp_payload, write_json
 
 BLOCK_ID = "SYSTEM_QUERY_STATE_BUILDER"
@@ -20,9 +21,10 @@ def run_system_query_state_builder() -> dict[str, Any]:
     sync = load_json(STATE_DIR / "latest_context_sync.json") or {}
     observation = load_json(STATE_DIR / "latest_observation_factory.json") or {}
     setup = load_json(STATE_DIR / "latest_setup_family_activation.json") or {}
-    paper_factory = load_json(STATE_DIR / "latest_paper_trade_factory.json") or {}
-    lifecycle = load_json(STATE_DIR / "latest_research_paper_lifecycle.json") or {}
-    edge = load_json(STATE_DIR / "latest_research_edge_matrix.json") or {}
+    paper_factory = load_json(epoch_state_path("latest_paper_trade_factory.json")) or {}
+    lifecycle = load_json(epoch_state_path("latest_research_paper_lifecycle.json")) or {}
+    accounting = load_json(epoch_state_path("latest_outcome_accounting.json")) or {}
+    edge = load_json(epoch_state_path("latest_research_edge_matrix.json")) or {}
     feedback = load_json(STATE_DIR / "latest_model_feedback.json") or {}
     promotion = load_json(STATE_DIR / "latest_model_promotion.json") or {}
     live_gate = load_json(STATE_DIR / "latest_live_eligibility_gate.json") or {}
@@ -41,7 +43,7 @@ def run_system_query_state_builder() -> dict[str, Any]:
         else blocking_reasons[0]
         if blocking_reasons
         else "CLEAN_SAMPLE_ACCUMULATION"
-        if int(edge_summary.get("clean_sample_count") or 0) < 20
+        if int((accounting.get("summary") or {}).get("clean_sample_count") or 0) < 20
         else "NONE"
     )
 
@@ -66,7 +68,7 @@ def run_system_query_state_builder() -> dict[str, Any]:
             "current_paper_status": lifecycle.get("summary") or {},
             "current_edge_status": {
                 "edge_status": edge.get("edge_status"),
-                "clean_sample_count": edge_summary.get("clean_sample_count"),
+                "clean_sample_count": (accounting.get("summary") or {}).get("clean_sample_count"),
                 "best_model_id": edge_summary.get("best_model_id"),
                 "best_expectancy": edge_summary.get("best_expectancy"),
             },
@@ -88,7 +90,7 @@ def run_system_query_state_builder() -> dict[str, Any]:
                 _qa("Why did paper trade open?", ",".join(setup.get("activation_reasons") or ["NO_PAPER_ACTIVATION"])[:200] if setup else "NO_ACTIVATION_STATE"),
                 _qa("Why did paper trade not open?", ",".join(blocking_reasons or ["NO_BLOCK"])[:200]),
                 _qa("Was any trade blocked by direction conflict?", "YES" if (paper_safety.get("blocked_by_context_direction_conflict", 0) or paper_safety.get("blocked_by_model_family_direction_conflict", 0)) else "NO"),
-                _qa("Why did edge not learn yet?", "CLEAN_SAMPLE_COUNT_BELOW_20" if int(edge_summary.get("clean_sample_count") or 0) < 20 else "EDGE_CAN_LEARN"),
+                _qa("Why did edge not learn yet?", "CLEAN_SAMPLE_COUNT_BELOW_20" if int((accounting.get("summary") or {}).get("clean_sample_count") or 0) < 20 else "EDGE_CAN_LEARN"),
                 _qa("Which models are best?", str(feedback_summary.get("best") or edge_summary.get("best_model_id") or "UNKNOWN")),
                 _qa("Which models need more samples?", str(len(feedback.get("models_needing_more_samples") or []))),
                 _qa("Is live trading enabled?", "NO"),
@@ -108,6 +110,7 @@ def run_system_query_state_builder() -> dict[str, Any]:
                         "latest_context_sync": sync,
                         "latest_setup_family_activation": setup,
                         "latest_research_paper_lifecycle": lifecycle,
+                        "latest_outcome_accounting": accounting,
                         "latest_research_edge_matrix": edge,
                         "latest_system_audit": audit,
                     }.items()

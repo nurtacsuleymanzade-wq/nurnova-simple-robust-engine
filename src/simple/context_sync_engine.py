@@ -15,6 +15,7 @@ from src.simple.research_runtime import (
     utc_now,
     write_json,
 )
+from src.simple.research_epoch import epoch_state_path
 
 STATE_DIR = Path("state/simple")
 OUTPUT_PATH = STATE_DIR / "latest_context_sync.json"
@@ -39,9 +40,12 @@ ACTIVE_CHAIN_FILES: dict[str, Path] = {
     "MODEL_CLUSTER_ENGINE": STATE_DIR / "latest_model_clusters.json",
     "MODEL_COOLDOWN_ENGINE": STATE_DIR / "latest_model_cooldown.json",
     "SETUP_FAMILY_ACTIVATION_ENGINE": STATE_DIR / "latest_setup_family_activation.json",
-    "PAPER_TRADE_FACTORY": STATE_DIR / "latest_paper_trade_factory.json",
-    "RESEARCH_PAPER_LIFECYCLE_ENGINE": STATE_DIR / "latest_research_paper_lifecycle.json",
-    "RESEARCH_EDGE_MATRIX_ENGINE": STATE_DIR / "latest_research_edge_matrix.json",
+    "TIMEFRAME_RESOLVER": epoch_state_path("latest_timeframe_resolution.json"),
+    "PAPER_TRADE_FACTORY": epoch_state_path("latest_paper_trade_factory.json"),
+    "RESEARCH_PAPER_LIFECYCLE_ENGINE": epoch_state_path("latest_research_paper_lifecycle.json"),
+    "OUTCOME_ACCOUNTING_ENGINE": epoch_state_path("latest_outcome_accounting.json"),
+    "RESEARCH_EDGE_MATRIX_ENGINE": epoch_state_path("latest_research_edge_matrix.json"),
+    "TELEGRAM_RESEARCH_REPORTER": epoch_state_path("latest_telegram_report.json"),
     "MODEL_FEEDBACK_DIAGNOSTIC": STATE_DIR / "latest_model_feedback.json",
     "MODEL_PROMOTION_ENGINE": STATE_DIR / "latest_model_promotion.json",
     "LIVE_ELIGIBILITY_GATE_DIAGNOSTIC": STATE_DIR / "latest_live_eligibility_gate.json",
@@ -65,9 +69,12 @@ CRITICAL_ACTIVE_BLOCKS = {
     "UNIFIED_CONTEXT_ENGINE",
     "MODEL_HUNTER_ENGINE",
     "SETUP_FAMILY_ACTIVATION_ENGINE",
+    "TIMEFRAME_RESOLVER",
     "PAPER_TRADE_FACTORY",
     "RESEARCH_PAPER_LIFECYCLE_ENGINE",
+    "OUTCOME_ACCOUNTING_ENGINE",
     "RESEARCH_EDGE_MATRIX_ENGINE",
+    "TELEGRAM_RESEARCH_REPORTER",
     "SYSTEM_AUDITOR_ENGINE",
     "SYSTEM_QUERY_STATE_BUILDER",
 }

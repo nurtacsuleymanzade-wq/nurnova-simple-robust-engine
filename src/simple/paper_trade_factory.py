@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from src.simple.jsonl_tail_reader import safe_read_json
+from src.simple.model_timeframe_profile import get_timeframe_profile
+from src.simple.research_epoch import ACTIVE_EPOCH_ID, append_epoch_jsonl, epoch_data_path, epoch_state_path
 from src.simple.research_runtime import (
-    append_jsonl,
     current_runtime_context,
     load_json,
     safe_float,
@@ -22,10 +23,9 @@ from src.simple.research_runtime import (
 
 BLOCK_ID = "PAPER_TRADE_FACTORY"
 STATE_DIR = Path("state/simple")
-DATA_DIR = Path("data/simple")
 
-OUTPUT_PATH = STATE_DIR / "latest_paper_trade_factory.json"
-HISTORY_PATH = DATA_DIR / "paper_trade_factory_history.jsonl"
+OUTPUT_PATH = epoch_state_path("latest_paper_trade_factory.json")
+HISTORY_PATH = epoch_data_path("paper_trade_factory_history.jsonl")
 
 MODEL_HUNTER_PATH = STATE_DIR / "latest_model_hunter.json"
 SEMANTIC_VALIDATION_PATH = STATE_DIR / "latest_model_semantic_validation.json"
@@ -37,8 +37,11 @@ DNA_PATH = STATE_DIR / "latest_mtf_candle_dna.json"
 LIQUIDITY_PATH = STATE_DIR / "latest_liquidity_map.json"
 BUSINESS_ZONE_PATH = STATE_DIR / "latest_business_zone.json"
 ATR_PATH = STATE_DIR / "latest_atr_state.json"
-RESEARCH_LIFECYCLE_PATH = STATE_DIR / "latest_research_paper_lifecycle.json"
-RESEARCH_LIFECYCLE_HISTORY_PATH = DATA_DIR / "research_paper_lifecycle_history.jsonl"
+RESEARCH_LIFECYCLE_PATH = epoch_state_path("latest_research_paper_lifecycle.json")
+RESEARCH_LIFECYCLE_HISTORY_PATH = epoch_data_path("research_paper_lifecycle_history.jsonl")
+TIMEFRAME_RESOLUTION_PATH = epoch_state_path("latest_timeframe_resolution.json")
+MARKET_STRUCTURE_PATH = STATE_DIR / "latest_market_structure.json"
+INTERPRETATION_PATH = STATE_DIR / "latest_interpretation.json"
 
 MAX_OPEN_TOTAL = 20
 MAX_OPEN_PER_MODEL_ID = 1
@@ -58,6 +61,157 @@ def _current_price(observation: dict[str, Any], dna: dict[str, Any]) -> float | 
 def _paper_trade_id(seed: str, entry: float | None) -> str:
     raw = f"{seed}|{entry}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
+
+
+def _derive_rr_fields(direction: str, entry: float | None, stop_loss: float | None, tp1: float | None, tp2: float | None) -> dict[str, float | None]:
+    if entry is None or stop_loss is None:
+        return {
+            "risk_distance": None,
+            "tp1_distance": None,
+            "tp2_distance": None,
+            "rr1": None,
+            "rr2": None,
+        }
+    if direction == "LONG":
+        risk_distance = entry - stop_loss
+        tp1_distance = tp1 - entry if tp1 is not None else None
+        tp2_distance = tp2 - entry if tp2 is not None else None
+    else:
+        risk_distance = stop_loss - entry
+        tp1_distance = entry - tp1 if tp1 is not None else None
+        tp2_distance = entry - tp2 if tp2 is not None else None
+    if risk_distance is None or risk_distance <= 0:
+        return {
+            "risk_distance": risk_distance,
+            "tp1_distance": tp1_distance,
+            "tp2_distance": tp2_distance,
+            "rr1": None,
+            "rr2": None,
+        }
+    rr1 = round(tp1_distance / risk_distance, 4) if tp1_distance is not None and tp1_distance > 0 else None
+    rr2 = round(tp2_distance / risk_distance, 4) if tp2_distance is not None and tp2_distance > 0 else None
+    return {
+        "risk_distance": round(risk_distance, 8),
+        "tp1_distance": round(tp1_distance, 8) if tp1_distance is not None else None,
+        "tp2_distance": round(tp2_distance, 8) if tp2_distance is not None else None,
+        "rr1": rr1,
+        "rr2": rr2,
+    }
+
+
+def _timeframe_style_bounds(primary_tf: str) -> tuple[int, int]:
+    if primary_tf == "1m":
+        return 2, 15
+    if primary_tf == "5m":
+        return 15, 90
+    if primary_tf == "15m":
+        return 60, 360
+    if primary_tf == "1h":
+        return 240, 1440
+    return 15, 90
+
+
+def _enrich_timeframe_plan(
+    trade: dict[str, Any],
+    timeframe_resolution: dict[str, Any],
+    setup_family: str,
+    model_id: str | None,
+) -> dict[str, Any]:
+    profile = get_timeframe_profile(setup_family, model_id=model_id)
+    hold = dict(profile.get("expected_hold_minutes") or {})
+    primary_tf = str(timeframe_resolution.get("primary_tf") or ((profile.get("preferred_primary_tf") or ["5m"])[0]))
+    trigger_tf = str(timeframe_resolution.get("trigger_tf") or ((profile.get("allowed_trigger_tf") or [primary_tf])[0]))
+    context_tf = str(timeframe_resolution.get("context_tf") or ((profile.get("context_tf") or ["15m"])[0]))
+    structure_tf = str(timeframe_resolution.get("structure_tf") or primary_tf)
+    rr_fields = _derive_rr_fields(
+        str(trade.get("direction") or "UNKNOWN").upper(),
+        safe_float(trade.get("entry")),
+        safe_float(trade.get("stop_loss")),
+        safe_float(trade.get("tp1")),
+        safe_float(trade.get("tp2")),
+    )
+    reason_codes = list(trade.get("reason_codes") or [])
+    if rr_fields["rr1"] is None and rr_fields["rr2"] is None:
+        reason_codes.append("RR_INVALID")
+    min_expected, max_expected = _timeframe_style_bounds(primary_tf)
+    hold_min = int(timeframe_resolution.get("expected_hold_min_minutes") or hold.get("min") or min_expected)
+    hold_max = int(timeframe_resolution.get("expected_hold_max_minutes") or hold.get("max") or max_expected)
+    if hold_min < min_expected or hold_max > max_expected:
+        reason_codes.append("TIMEFRAME_STYLE_MISMATCH_HOLD")
+    if rr_fields["risk_distance"] is not None and rr_fields["risk_distance"] <= 0:
+        reason_codes.append("TIMEFRAME_STYLE_MISMATCH_RISK")
+    enriched = dict(trade)
+    enriched.update(rr_fields)
+    enriched.update(
+        {
+            "primary_tf": primary_tf,
+            "trigger_tf": trigger_tf,
+            "context_tf": context_tf,
+            "structure_tf": structure_tf,
+            "expected_hold_min_minutes": hold_min,
+            "expected_hold_max_minutes": hold_max,
+            "expected_hold_label": str(timeframe_resolution.get("expected_hold_label") or f"{hold_min}m–{hold_max}m"),
+            "timeframe_confidence": float(timeframe_resolution.get("timeframe_confidence") or 0.0),
+            "timeframe_reason": list(timeframe_resolution.get("timeframe_reason") or [f"{primary_tf} profile fallback"]),
+            "plan_style": str(timeframe_resolution.get("profile", {}).get("plan_style") or profile.get("plan_style") or "DEFAULT_INTRADAY"),
+            "max_holding_seconds": hold_max * 60,
+            "rr_tp1": rr_fields["rr1"],
+            "rr_tp2": rr_fields["rr2"],
+            "reason_codes": sorted(set(reason_codes)),
+        }
+    )
+    return enriched
+
+
+def _cause_chain() -> list[str]:
+    return [
+        "raw_observation",
+        "mtf_candle_dna",
+        "market_structure",
+        "liquidity_event",
+        "interpretation",
+        "setup_family_activation",
+        "timeframe_resolution",
+        "trade_plan",
+    ]
+
+
+def _edge_invalid(trade: dict[str, Any]) -> bool:
+    missing_tf = not trade.get("primary_tf") or not trade.get("trigger_tf") or not trade.get("context_tf")
+    missing_rr = trade.get("rr1") is None and trade.get("rr2") is None
+    return missing_tf or missing_rr
+
+
+def _required_field_issues(trade: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for field in (
+        "symbol",
+        "paper_trade_id",
+        "context_id",
+        "loop_id",
+        "model_id",
+        "setup_family",
+        "direction",
+        "entry",
+        "stop_loss",
+        "tp1",
+        "tp2",
+        "primary_tf",
+        "trigger_tf",
+        "context_tf",
+        "structure_tf",
+        "rr1",
+        "rr2",
+        "risk_distance",
+        "tp1_distance",
+        "tp2_distance",
+        "cause_chain",
+        "source_state_refs",
+    ):
+        value = trade.get(field)
+        if value in (None, "", [], {}):
+            missing.append(field)
+    return missing
 
 
 def _target_reference(direction: str, entry: float, liquidity: dict[str, Any]) -> dict[str, Any] | None:
@@ -280,6 +434,7 @@ def _build_trade(
     activation_source_clusters: list[dict[str, Any]],
     activation_band: str,
     activation_risk_tags: list[str],
+    timeframe_resolution: dict[str, Any],
 ) -> dict[str, Any]:
     representative = dict(cluster.get("paper_representative") or {})
     direction = str(representative.get("direction") or cluster.get("direction") or "UNKNOWN").upper()
@@ -298,11 +453,11 @@ def _build_trade(
         invalid_reason = "INVALID_ENTRY_PRICE"
 
     if atr_1m is not None and atr_1m > 0 and entry is not None:
-        risk_distance = max(atr_1m, entry * 0.001)
+        initial_risk_distance = max(atr_1m, entry * 0.001)
     else:
-        risk_distance = entry * 0.002 if entry is not None else None
+        initial_risk_distance = entry * 0.002 if entry is not None else None
         reason_codes.append("FALLBACK_STOP_DISTANCE_USED")
-    if entry is None or risk_distance is None or risk_distance <= 0:
+    if entry is None or initial_risk_distance is None or initial_risk_distance <= 0:
         invalid_reason = invalid_reason or "RISK_DISTANCE_INVALID"
 
     stop_loss = None
@@ -310,15 +465,15 @@ def _build_trade(
     tp2 = None
     rr_tp1 = None
     rr_tp2 = None
-    if invalid_reason is None and entry is not None and risk_distance is not None:
+    if invalid_reason is None and entry is not None and initial_risk_distance is not None:
         if direction == "LONG":
-            stop_loss = round(entry - risk_distance, 8)
-            tp1 = round(entry + 1.5 * risk_distance, 8)
-            tp2 = round(entry + 2.5 * risk_distance, 8)
+            stop_loss = round(entry - initial_risk_distance, 8)
+            tp1 = round(entry + 1.5 * initial_risk_distance, 8)
+            tp2 = round(entry + 2.5 * initial_risk_distance, 8)
         else:
-            stop_loss = round(entry + risk_distance, 8)
-            tp1 = round(entry - 1.5 * risk_distance, 8)
-            tp2 = round(entry - 2.5 * risk_distance, 8)
+            stop_loss = round(entry + initial_risk_distance, 8)
+            tp1 = round(entry - 1.5 * initial_risk_distance, 8)
+            tp2 = round(entry - 2.5 * initial_risk_distance, 8)
         rr_tp1 = 1.5
         rr_tp2 = 2.5
 
@@ -326,18 +481,19 @@ def _build_trade(
     source_cluster["paper_representative"] = representative
     source_state_refs = source_state_refs_from_paths(
         {
-            "setup_family_activation": SETUP_ACTIVATION_PATH,
-            "observation_factory": OBSERVATION_PATH,
+            "setup_activation": SETUP_ACTIVATION_PATH,
+            "observation": OBSERVATION_PATH,
             "mtf_candle_dna": DNA_PATH,
+            "market_structure": MARKET_STRUCTURE_PATH,
             "liquidity_map": LIQUIDITY_PATH,
-            "business_zone": BUSINESS_ZONE_PATH,
-            "atr_state": ATR_PATH,
-            "research_paper_lifecycle": RESEARCH_LIFECYCLE_PATH,
+            "interpretation": INTERPRETATION_PATH,
+            "timeframe_resolution": TIMEFRAME_RESOLUTION_PATH,
         }
     )
     market_regime = str(representative.get("market_regime") or "UNKNOWN")
     direction_resolution = representative.get("direction_resolution") or {"resolution_mode": "UNRESOLVED"}
-    return {
+    trade = {
+        "epoch_id": ACTIVE_EPOCH_ID,
         "paper_trade_id": _paper_trade_id(str(cluster.get("cluster_id") or representative.get("model_instance_id")), entry),
         "context_id": context.get("context_id"),
         "loop_id": context.get("loop_id"),
@@ -372,19 +528,41 @@ def _build_trade(
         "tp2": tp2,
         "rr_tp1": rr_tp1,
         "rr_tp2": rr_tp2,
-        "risk_distance": risk_distance,
+        "risk_distance": initial_risk_distance,
         "target_reference": _target_reference(direction, entry or 0.0, liquidity) if entry is not None else None,
         "opened_at_utc": utc_now(),
         "max_holding_seconds": 1800,
         "status": "INVALID" if invalid_reason else "OPEN",
         "invalid_reason": invalid_reason,
         "invalid_for_edge": bool(invalid_reason) or not context.get("context_id") or not representative.get("model_id"),
+        "valid_for_lifecycle": True,
+        "valid_for_edge": True,
         "reason_codes": sorted(set(reason_codes)),
         "source_model_instance": representative.get("source_model_instance") or representative,
         "source_cluster": source_cluster,
         "source_business_zone_ref": business_zone.get("timestamp_utc"),
         "source_state_refs": source_state_refs,
+        "cause_chain": _cause_chain(),
     }
+    trade = _enrich_timeframe_plan(trade, timeframe_resolution, setup_family, representative.get("model_id"))
+    edge_invalid = _edge_invalid(trade)
+    required_issues = _required_field_issues(trade)
+    trade["invalid_for_edge"] = bool(trade.get("invalid_for_edge")) or edge_invalid or bool(required_issues)
+    trade["valid_for_edge"] = not trade["invalid_for_edge"]
+    trade["valid_for_lifecycle"] = not bool(required_issues)
+    if edge_invalid:
+        trade["reason_codes"] = sorted(set([*(trade.get("reason_codes") or []), "MISSING_TIMEFRAME_OR_RR"]))
+        invalid_reason_codes = list(trade.get("invalid_reason_codes") or [])
+        invalid_reason_codes.append("MISSING_TIMEFRAME_OR_RR")
+        trade["invalid_reason_codes"] = sorted(set(invalid_reason_codes))
+        if not trade.get("invalid_reason"):
+            trade["invalid_reason"] = "MISSING_TIMEFRAME_OR_RR"
+    if required_issues:
+        trade["reason_codes"] = sorted(set([*(trade.get("reason_codes") or []), "FACTORY_REQUIRED_FIELDS_MISSING"]))
+        reason = f"MISSING_FIELDS:{','.join(sorted(required_issues))}"
+        trade["invalid_reason"] = "|".join(item for item in [trade.get("invalid_reason"), reason] if item)
+        trade["invalid_reason_codes"] = sorted(set([*(trade.get("invalid_reason_codes") or []), *[f"MISSING_{field.upper()}" for field in required_issues]]))
+    return trade
 
 
 def _compact_trade_snapshot(trade: dict[str, Any]) -> dict[str, Any]:
@@ -403,14 +581,33 @@ def _compact_trade_snapshot(trade: dict[str, Any]) -> dict[str, Any]:
         "tp1",
         "tp2",
         "risk_distance",
+        "tp1_distance",
+        "tp2_distance",
+        "rr1",
+        "rr2",
         "status",
         "invalid_reason",
+        "valid_for_lifecycle",
+        "valid_for_edge",
+        "epoch_id",
         "activation_band",
         "activation_score",
-        "reason_codes",
-        "opened_at_utc",
-        "max_holding_seconds",
-        "invalid_for_edge",
+        "primary_tf",
+        "trigger_tf",
+        "context_tf",
+        "structure_tf",
+        "expected_hold_label",
+        "expected_hold_min_minutes",
+        "expected_hold_max_minutes",
+        "timeframe_confidence",
+        "timeframe_reason",
+        "plan_style",
+            "reason_codes",
+            "opened_at_utc",
+            "max_holding_seconds",
+            "invalid_for_edge",
+            "cause_chain",
+        "source_state_refs",
     )
     return {field: trade.get(field) for field in keep_fields if field in trade}
 
@@ -427,6 +624,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
     liquidity = load_json(LIQUIDITY_PATH) or {}
     business_zone = load_json(BUSINESS_ZONE_PATH) or {}
     atr = load_json(ATR_PATH) or {}
+    timeframe_resolution = load_json(TIMEFRAME_RESOLUTION_PATH) or {}
     lifecycle, lifecycle_reason = safe_read_json(RESEARCH_LIFECYCLE_PATH, default={}, max_bytes=500_000)
     lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
 
@@ -491,6 +689,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
             activation_source_clusters=activation_source_clusters,
             activation_band=activation_band,
             activation_risk_tags=activation_risk_tags,
+            timeframe_resolution=timeframe_resolution,
         )
 
         if trade.get("status") == "INVALID":
@@ -562,6 +761,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
         "source": {
             "source_mode": source_selection_mode,
         },
+        "epoch_id": ACTIVE_EPOCH_ID,
         "newest_opened_this_loop": newest_opened_this_loop,
         "top_candidate_diagnostics": top_candidate_diagnostics,
         "paper_safety": paper_safety,
@@ -572,12 +772,14 @@ def run_paper_trade_factory() -> dict[str, Any]:
             "allowed_clusters": len(cooldown.get("allowed_clusters") or []),
             "setup_family_activation_ready": activation_ready,
             "activation_band": activation_band,
-            "paper_trade_candidates": len([trade for trade in trades if str(trade.get("status") or "").upper() == "OPEN"]),
-            "invalid_candidates": len([trade for trade in trades if trade.get("status") == "INVALID"]),
-            "blocked_candidates": len([trade for trade in trades if trade.get("status") == "BLOCKED"]),
-            "existing_open_trades": len(open_trades),
-            "lifecycle_latest_read_status": lifecycle_reason or "OK",
-        },
+                "paper_trade_candidates": len([trade for trade in trades if str(trade.get("status") or "").upper() == "OPEN"]),
+                "invalid_candidates": len([trade for trade in trades if trade.get("status") == "INVALID"]),
+                "blocked_candidates": len([trade for trade in trades if trade.get("status") == "BLOCKED"]),
+                "valid_for_lifecycle_count": len([trade for trade in trades if trade.get("valid_for_lifecycle") is True]),
+                "valid_for_edge_count": len([trade for trade in trades if trade.get("valid_for_edge") is True]),
+                "existing_open_trades": len(open_trades),
+                "lifecycle_latest_read_status": lifecycle_reason or "OK",
+            },
         "reason_codes": [
             f"PAPER_TRADES_{len(trades)}",
             *selection_reason_codes,
@@ -598,6 +800,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
                 "latest_liquidity_map": liquidity,
                 "latest_business_zone": business_zone,
                 "latest_atr_state": atr,
+                "latest_timeframe_resolution": timeframe_resolution,
                 "latest_research_paper_lifecycle": lifecycle,
             }.items() if not payload],
         },
@@ -619,7 +822,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
     }, BLOCK_ID, str(observation.get("symbol") or semantic.get("symbol") or hunter.get("symbol") or "BTCUSDT"), context)
 
     write_json(OUTPUT_PATH, output)
-    append_jsonl(HISTORY_PATH, output)
+    append_epoch_jsonl("paper_trade_factory_history.jsonl", output)
     return output
 
 

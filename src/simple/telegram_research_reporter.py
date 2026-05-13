@@ -1,44 +1,37 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
-from datetime import datetime, timedelta, timezone
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib import parse, request
 
-from src.simple.jsonl_tail_reader import safe_read_json
-from src.simple.research_runtime import append_jsonl, current_runtime_context, load_json, parse_ts, safe_float, stamp_payload, write_json
+from src.simple.research_epoch import ACTIVE_EPOCH_ID, append_epoch_jsonl, epoch_data_path, epoch_state_path
+from src.simple.research_runtime import current_runtime_context, load_json, safe_float, stamp_payload, write_json
 
 BLOCK_ID = "TELEGRAM_RESEARCH_REPORTER"
+OUTPUT_PATH = epoch_state_path("latest_telegram_report.json")
+HISTORY_PATH = epoch_data_path("telegram_report_history.jsonl")
+FACTORY_PATH = epoch_state_path("latest_paper_trade_factory.json")
+LIFECYCLE_PATH = epoch_state_path("latest_research_paper_lifecycle.json")
+ACCOUNTING_PATH = epoch_state_path("latest_outcome_accounting.json")
+EDGE_PATH = epoch_state_path("latest_research_edge_matrix.json")
 STATE_DIR = Path("state/simple")
-DATA_DIR = Path("data/simple")
-
-SYSTEM_AUDIT_PATH = STATE_DIR / "latest_system_audit.json"
-CONTEXT_SYNC_PATH = STATE_DIR / "latest_context_sync.json"
-OBSERVATION_PATH = STATE_DIR / "latest_observation_factory.json"
-SETUP_ACTIVATION_PATH = STATE_DIR / "latest_setup_family_activation.json"
-PAPER_TRADE_FACTORY_PATH = STATE_DIR / "latest_paper_trade_factory.json"
-LIFECYCLE_PATH = STATE_DIR / "latest_research_paper_lifecycle.json"
-EDGE_PATH = STATE_DIR / "latest_research_edge_matrix.json"
-FEEDBACK_PATH = STATE_DIR / "latest_model_feedback.json"
-PROMOTION_PATH = STATE_DIR / "latest_model_promotion.json"
-LIVE_GATE_PATH = STATE_DIR / "latest_live_eligibility_gate.json"
-
-OUTPUT_PATH = STATE_DIR / "latest_telegram_report.json"
-REPORTED_TRADES_PATH = STATE_DIR / "telegram_reported_trades.json"
-HISTORY_PATH = DATA_DIR / "telegram_report_history.jsonl"
-
+REPORTED_TRADES_PATH = epoch_state_path("telegram_reported_trades.json")
+SUMMARY_HASH_PATH = epoch_state_path("last_summary_hash.json")
 CLOSED_STATUSES = {"TP1_HIT", "TP2_HIT", "SL_HIT", "EXPIRED"}
-UTC_PLUS_4 = timezone(timedelta(hours=4))
-MAX_INSTANT_SIGNALS = 5
-MAX_RESULT_ALERTS = 5
-MAX_REPORTED_IDS = 5000
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _hash_payload(payload: Any) -> str:
+    return hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _format_number(value: Any, digits: int = 4) -> str:
@@ -48,18 +41,22 @@ def _format_number(value: Any, digits: int = 4) -> str:
     return f"{number:.{digits}f}".rstrip("0").rstrip(".")
 
 
-def _status_time_utc_plus_4(value: Any) -> str:
-    dt = parse_ts(value) or datetime.now(timezone.utc)
-    return dt.astimezone(UTC_PLUS_4).strftime("%Y-%m-%d %H:%M:%S UTC+4")
+def _format_percent(value: Any) -> str:
+    number = safe_float(value)
+    if number is None:
+        return "n/a"
+    if number <= 1:
+        number *= 100
+    return f"{number:.1f}".rstrip("0").rstrip(".") + "%"
 
 
 def _load_reported_state() -> dict[str, Any]:
     payload = load_json(REPORTED_TRADES_PATH) or {}
     return {
-        "reported_open_trade_ids": list(payload.get("reported_open_trade_ids") or []),
-        "reported_closed_trade_ids": list(payload.get("reported_closed_trade_ids") or []),
-        "last_summary_sent_at_utc": payload.get("last_summary_sent_at_utc"),
-        "updated_at_utc": payload.get("updated_at_utc"),
+        "reported_open_trade_ids": set(str(item) for item in payload.get("reported_open_trade_ids") or [] if item),
+        "reported_closed_trade_ids": set(str(item) for item in payload.get("reported_closed_trade_ids") or [] if item),
+        "reported_open_hashes": set(str(item) for item in payload.get("reported_open_hashes") or [] if item),
+        "reported_closed_hashes": set(str(item) for item in payload.get("reported_closed_hashes") or [] if item),
     }
 
 
@@ -67,373 +64,245 @@ def _write_reported_state(state: dict[str, Any]) -> None:
     write_json(
         REPORTED_TRADES_PATH,
         {
-            "reported_open_trade_ids": sorted({str(item) for item in state.get("reported_open_trade_ids") or [] if item})[-MAX_REPORTED_IDS:],
-            "reported_closed_trade_ids": sorted({str(item) for item in state.get("reported_closed_trade_ids") or [] if item})[-MAX_REPORTED_IDS:],
-            "last_summary_sent_at_utc": state.get("last_summary_sent_at_utc"),
+            "reported_open_trade_ids": sorted(state["reported_open_trade_ids"]),
+            "reported_closed_trade_ids": sorted(state["reported_closed_trade_ids"]),
+            "reported_open_hashes": sorted(state["reported_open_hashes"]),
+            "reported_closed_hashes": sorted(state["reported_closed_hashes"]),
             "updated_at_utc": _utc_now(),
         },
     )
 
 
-def _send_telegram(token: str, chat_id: str, message_text: str) -> dict[str, Any]:
+def _load_summary_hash() -> str:
+    return str((load_json(SUMMARY_HASH_PATH) or {}).get("last_summary_hash") or "")
+
+
+def _write_summary_hash(summary_hash: str, preview: str) -> None:
+    write_json(SUMMARY_HASH_PATH, {"last_summary_hash": summary_hash, "last_summary_preview": preview[:500], "updated_at_utc": _utc_now()})
+
+
+def _send_telegram(token: str, chat_id: str, text: str) -> dict[str, Any]:
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = parse.urlencode({"chat_id": chat_id, "text": message_text}).encode("utf-8")
+    payload = parse.urlencode({"chat_id": chat_id, "text": text}).encode("utf-8")
     req = request.Request(url, data=payload, method="POST")
     with request.urlopen(req, timeout=10) as response:
-        body = response.read().decode("utf-8")
-    return json.loads(body)
+        return json.loads(response.read().decode("utf-8"))
 
 
-def _trade_reason(trade: dict[str, Any]) -> str:
-    reason = trade.get("reason")
-    if reason:
-        return str(reason)
-    reasons = trade.get("activation_reasons") or trade.get("reason_codes") or []
-    if isinstance(reasons, list) and reasons:
-        return ", ".join(str(item) for item in reasons[:3])
-    return "RESEARCH_SIGNAL"
+def _first_trade(*collections: list[dict[str, Any]]) -> dict[str, Any]:
+    for collection in collections:
+        if collection:
+            return dict(collection[0])
+    return {}
 
 
-def _best_model_name(feedback: dict[str, Any], promotion: dict[str, Any], edge: dict[str, Any]) -> str:
-    for value in (
-        (feedback.get("summary") or {}).get("best"),
-        (promotion.get("feedback_summary") or {}).get("best"),
-        (edge.get("summary") or {}).get("best_model_id"),
-    ):
-        text = str(value or "").strip()
-        if text:
-            return text
-    return "UNKNOWN"
-
-
-def _worst_model_name(feedback: dict[str, Any], promotion: dict[str, Any]) -> str:
-    for value in (
-        (feedback.get("summary") or {}).get("worst"),
-        (promotion.get("feedback_summary") or {}).get("worst"),
-    ):
-        text = str(value or "").strip()
-        if text:
-            return text
-    return "UNKNOWN"
-
-
-def _summary_bottleneck(audit: dict[str, Any], sync: dict[str, Any], promotion: dict[str, Any], live_gate: dict[str, Any]) -> str:
-    critical = audit.get("critical_issues") or []
-    if critical:
-        return str(critical[0])
-    warnings = audit.get("warnings") or []
-    if warnings:
-        return str(warnings[0])
-    mismatches = sync.get("context_mismatches") or []
-    if mismatches:
-        return "CONTEXT_MISMATCH"
-    stale = sync.get("critical_stale") or []
-    if stale:
-        return "CRITICAL_STALE_STATE"
-    sample_building = int((promotion.get("feedback_summary") or {}).get("sample_building") or 0)
-    if sample_building > 0:
-        return f"SAMPLE_BUILDING_{sample_building}"
-    blockers = live_gate.get("blocking_reasons") or []
-    if blockers:
-        return str(blockers[0])
-    return "NONE"
-
-
-def _closed_stats(lifecycle: dict[str, Any]) -> dict[str, Any]:
-    summary = lifecycle.get("summary") or {}
-    closed = int(summary.get("closed") or len(lifecycle.get("recent_closed") or []))
-    tp_count = int(summary.get("tp") or 0)
-    sl_count = int(summary.get("sl") or 0)
-    expired_count = int(summary.get("expired") or 0)
-    winrate = round(tp_count / closed, 4) if closed else None
+def _active_setup(factory: dict[str, Any], lifecycle: dict[str, Any], edge: dict[str, Any]) -> dict[str, Any]:
+    trade = _first_trade(
+        list(lifecycle.get("open_trades") or []),
+        list(factory.get("newest_opened_this_loop") or []),
+        list(factory.get("top_candidate_diagnostics") or []),
+        list(edge.get("groups") or []),
+    )
     return {
-        "closed_count": closed,
-        "tp_count": tp_count,
-        "sl_count": sl_count,
-        "expired_count": expired_count,
-        "winrate": winrate,
+        "setup_family": trade.get("setup_family") or "NO_ACTIVE_SETUP",
+        "primary_tf": trade.get("primary_tf") or "n/a",
+        "context_tf": trade.get("context_tf") or "n/a",
+        "model_id": trade.get("model_id") or "UNKNOWN",
     }
 
 
-def _is_trade_after_sanitize(trade: dict[str, Any], sanitized_at_utc: str | None) -> bool:
-    if not sanitized_at_utc:
-        return True
-    cutoff = parse_ts(sanitized_at_utc)
-    trade_ts = parse_ts(
-        trade.get("closed_at_utc")
-        or trade.get("opened_at_utc")
-        or trade.get("timestamp_utc")
-    )
-    if cutoff is None or trade_ts is None:
-        return False
-    return trade_ts >= cutoff
-
-
 def _instant_signal_message(trade: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "NURNOVA SIGNAL",
+            "",
+            f"Epoch: {ACTIVE_EPOCH_ID}",
+            f"Pair: {trade.get('symbol') or 'BTCUSDT'}",
+            f"Setup: {trade.get('setup_family') or 'UNKNOWN'}",
+            f"Direction: {trade.get('direction') or 'UNKNOWN'}",
+            f"Primary TF: {trade.get('primary_tf') or 'n/a'}",
+            f"Context TF: {trade.get('context_tf') or 'n/a'}",
+            f"Entry: {_format_number(trade.get('entry'))}",
+            f"Stop: {_format_number(trade.get('stop_loss'))}",
+            f"TP1: {_format_number(trade.get('tp1'))}",
+            f"TP2: {_format_number(trade.get('tp2'))}",
+            f"RR1: {_format_number(trade.get('rr1'))}",
+            f"RR2: {_format_number(trade.get('rr2'))}",
+            "Live Trade OFF",
+        ]
+    )
+
+
+def _result_message(trade: dict[str, Any], accounting: dict[str, Any]) -> str:
+    stats = accounting.get("summary") or {}
+    return "\n".join(
+        [
+            "NURNOVA RESULT",
+            "",
+            f"Epoch: {ACTIVE_EPOCH_ID}",
+            f"Pair: {trade.get('symbol') or 'BTCUSDT'}",
+            f"Setup: {trade.get('setup_family') or 'UNKNOWN'}",
+            f"Direction: {trade.get('direction') or 'UNKNOWN'}",
+            f"Result: {trade.get('close_reason') or trade.get('status') or 'UNKNOWN'}",
+            f"R Result: {_format_number(trade.get('r_result'))}",
+            f"Winrate: {_format_percent(stats.get('winrate'))}",
+            f"Average R: {_format_number(stats.get('avg_r'))}",
+            "Live Trade OFF",
+        ]
+    )
+
+
+def _summary_message(factory: dict[str, Any], lifecycle: dict[str, Any], accounting: dict[str, Any], edge: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    active = _active_setup(factory, lifecycle, edge)
+    lifecycle_summary = lifecycle.get("summary") or {}
+    accounting_summary = accounting.get("summary") or {}
+    edge_summary = edge.get("summary") or {}
+    payload = {
+        "epoch_id": ACTIVE_EPOCH_ID,
+        "active_setup": active["setup_family"],
+        "primary_tf": active["primary_tf"],
+        "context_tf": active["context_tf"],
+        "open_trades": int(lifecycle_summary.get("open") or len(lifecycle.get("open_trades") or [])),
+        "closed_trades": int(accounting_summary.get("closed_count") or 0),
+        "wins": int(accounting_summary.get("wins") or 0),
+        "losses": int(accounting_summary.get("losses") or 0),
+        "expired": int(accounting_summary.get("expired") or 0),
+        "winrate": accounting_summary.get("winrate"),
+        "average_r": accounting_summary.get("avg_r"),
+        "edge_status": edge.get("edge_status") or "NO_CLEAN_SAMPLES",
+        "best_model": edge_summary.get("best_model_id") or active["model_id"],
+        "sample_count": int(edge_summary.get("best_sample_size") or accounting_summary.get("clean_sample_count") or 0),
+        "live_trade": "OFF",
+    }
     lines = [
-        "PAPER TRADE SIGNAL",
-        f"Pair: {trade.get('symbol') or 'UNKNOWN'}",
-        f"Direction: {trade.get('direction') or 'UNKNOWN'}",
-        f"Model: {trade.get('model_id') or trade.get('dominant_model_id') or 'UNKNOWN'}",
-        f"Setup: {trade.get('setup_family') or trade.get('dominant_setup_family') or 'UNKNOWN'}",
-        f"Reason: {_trade_reason(trade)}",
-        f"Entry: {_format_number(trade.get('entry'))}",
-        f"Stop Loss: {_format_number(trade.get('stop_loss'))}",
-        f"TP1: {_format_number(trade.get('tp1'))}",
-        f"TP2: {_format_number(trade.get('tp2'))}",
-        f"RR: {_format_number(trade.get('rr_tp2') if safe_float(trade.get('rr_tp2')) is not None else trade.get('rr_tp1'))}",
-        "Status: PAPER OPENED",
-        f"Time UTC+4: {_status_time_utc_plus_4(trade.get('opened_at_utc') or trade.get('timestamp_utc'))}",
+        "NURNOVA RESEARCH REPORT",
+        "",
+        f"Epoch: {ACTIVE_EPOCH_ID}",
+        f"Active setup: {payload['active_setup']}",
+        f"Primary TF: {payload['primary_tf']}",
+        f"Context TF: {payload['context_tf']}",
+        f"Open trades: {payload['open_trades']}",
+        f"Closed trades: {payload['closed_trades']}",
+        f"Wins: {payload['wins']}",
+        f"Losses: {payload['losses']}",
+        f"Expired: {payload['expired']}",
+        f"Winrate: {_format_percent(payload['winrate'])}",
+        f"Average R: {_format_number(payload['average_r'])}",
+        f"Edge status: {payload['edge_status']}",
+        f"Best model: {payload['best_model']}",
+        f"Sample count: {payload['sample_count']}",
         "Live Trade OFF",
     ]
-    return "\n".join(lines)
-
-
-def _result_message(trade: dict[str, Any], lifecycle: dict[str, Any], feedback: dict[str, Any], promotion: dict[str, Any], edge: dict[str, Any]) -> str:
-    stats = _closed_stats(lifecycle)
-    lines = [
-        "PAPER TRADE RESULT",
-        f"Pair: {trade.get('symbol') or 'UNKNOWN'}",
-        f"Direction: {trade.get('direction') or 'UNKNOWN'}",
-        f"Model: {trade.get('model_id') or trade.get('dominant_model_id') or 'UNKNOWN'}",
-        f"Setup: {trade.get('setup_family') or trade.get('dominant_setup_family') or 'UNKNOWN'}",
-        f"Entry: {_format_number(trade.get('entry'))}",
-        f"Exit: {_format_number(trade.get('exit_price'))}",
-        f"Result: {trade.get('status') or trade.get('close_reason') or 'UNKNOWN'}",
-        f"R Result: {_format_number(trade.get('r_result'))}",
-        f"Closed count: {stats['closed_count']}",
-        f"TP count: {stats['tp_count']}",
-        f"SL count: {stats['sl_count']}",
-        f"Expired count: {stats['expired_count']}",
-        f"Winrate: {_format_number(stats['winrate'])}",
-        f"Best model: {_best_model_name(feedback, promotion, edge)}",
-        "Live Trade OFF",
-    ]
-    return "\n".join(lines)
-
-
-def _summary_message(
-    audit: dict[str, Any],
-    sync: dict[str, Any],
-    setup: dict[str, Any],
-    lifecycle: dict[str, Any],
-    edge: dict[str, Any],
-    feedback: dict[str, Any],
-    promotion: dict[str, Any],
-    live_gate: dict[str, Any],
-) -> str:
-    summary = lifecycle.get("summary") or {}
-    closed = _closed_stats(lifecycle)
-    expectancy = (edge.get("summary") or {}).get("best_expectancy")
-    if expectancy is None and edge.get("groups"):
-        expectancy_values = [safe_float(group.get("expectancy")) for group in edge.get("groups") or []]
-        expectancy_values = [value for value in expectancy_values if value is not None]
-        if expectancy_values:
-            expectancy = round(sum(expectancy_values) / len(expectancy_values), 4)
-    sample_building = int((promotion.get("feedback_summary") or {}).get("sample_building") or 0)
-    lines = [
-        "RESEARCH SUMMARY 15M",
-        f"System health: {audit.get('system_status') or 'UNKNOWN'}",
-        f"Sync status: {sync.get('sync_status') or 'UNKNOWN'}",
-        f"Active setup: {setup.get('dominant_setup_family') or 'NO_ACTIVE_SETUP_FAMILY'}",
-        f"Opened / open / closed / invalid: {summary.get('opened', 0)} / {summary.get('open', 0)} / {summary.get('closed', 0)} / {summary.get('invalid', 0)}",
-        f"TP count / SL count / expired: {closed['tp_count']} / {closed['sl_count']} / {closed['expired_count']}",
-        f"Winrate: {_format_number(closed['winrate'])}",
-        f"Expectancy: {_format_number(expectancy)}",
-        f"Best model: {_best_model_name(feedback, promotion, edge)}",
-        f"Worst model: {_worst_model_name(feedback, promotion)}",
-        f"Sample building count: {sample_building}",
-        f"Current bottleneck: {_summary_bottleneck(audit, sync, promotion, live_gate)}",
-        "Live Trade OFF",
-    ]
-    return "\n".join(lines)
-
-
-def _maybe_send_messages(token: str | None, chat_id: str | None, messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
-    if not token or not chat_id:
-        for item in messages:
-            item["telegram_status"] = "TELEGRAM_NOT_CONFIGURED"
-            item["telegram_ok"] = False
-        return "TELEGRAM_NOT_CONFIGURED", messages
-
-    overall_status = "NO_MESSAGES"
-    for item in messages:
-        try:
-            response = _send_telegram(token, chat_id, item["message_text"])
-            ok = bool(response.get("ok"))
-            item["telegram_response"] = response
-            item["telegram_ok"] = ok
-            item["telegram_status"] = "SENT" if ok else "TELEGRAM_SEND_FAILED"
-            if ok:
-                overall_status = "SENT"
-            elif overall_status != "SENT":
-                overall_status = "TELEGRAM_SEND_FAILED"
-        except Exception as exc:
-            item["telegram_ok"] = False
-            item["telegram_status"] = "TELEGRAM_SEND_FAILED"
-            item["error"] = str(exc)[:300]
-            if overall_status != "SENT":
-                overall_status = "TELEGRAM_SEND_FAILED"
-    return overall_status, messages
+    return "\n".join(lines), payload
 
 
 def run_reporter(mode: str) -> dict[str, Any]:
     context = current_runtime_context()
-    audit = load_json(SYSTEM_AUDIT_PATH) or {}
-    sync = load_json(CONTEXT_SYNC_PATH) or {}
-    observation = load_json(OBSERVATION_PATH) or {}
-    setup = load_json(SETUP_ACTIVATION_PATH) or {}
-    factory = load_json(PAPER_TRADE_FACTORY_PATH) or {}
-    lifecycle, lifecycle_read_reason = safe_read_json(LIFECYCLE_PATH, default={}, max_bytes=500_000)
-    lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+    factory = load_json(FACTORY_PATH) or {}
+    lifecycle = load_json(LIFECYCLE_PATH) or {}
+    accounting = load_json(ACCOUNTING_PATH) or {}
     edge = load_json(EDGE_PATH) or {}
-    feedback = load_json(FEEDBACK_PATH) or {}
-    promotion = load_json(PROMOTION_PATH) or {}
-    live_gate = load_json(LIVE_GATE_PATH) or {}
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     reported = _load_reported_state()
-
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() or None
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip() or None
-    input_symbol = str(
-        observation.get("symbol")
-        or factory.get("symbol")
-        or lifecycle.get("symbol")
-        or edge.get("symbol")
-        or "BTCUSDT"
-    )
-
     messages: list[dict[str, Any]] = []
-    reason_codes = ["PAPER_ONLY", "NO_LIVE_EXECUTION", "NO_PRIVATE_API"]
-    pending_open_ids: set[str] = set()
-    pending_closed_ids: set[str] = set()
-    sanitized_at_utc = lifecycle.get("sanitized_at_utc")
-    backlog_skipped = False
+    dedup_suppressed = 0
 
     if mode == "instant":
-        open_ids = {str(item) for item in reported.get("reported_open_trade_ids") or [] if item}
-        closed_ids = {str(item) for item in reported.get("reported_closed_trade_ids") or [] if item}
-        open_candidates = list(lifecycle.get("new_trades_opened") or [])
-        closed_candidates = list(lifecycle.get("trades_closed_this_loop") or [])
-
-        if not open_candidates:
-            open_candidates = list(lifecycle.get("open_trades") or [])
-        if not closed_candidates:
-            closed_candidates = list(lifecycle.get("recent_closed") or [])
-
-        open_candidates = [trade for trade in open_candidates if _is_trade_after_sanitize(trade, sanitized_at_utc)]
-        closed_candidates = [trade for trade in closed_candidates if _is_trade_after_sanitize(trade, sanitized_at_utc)]
-
-        pending_open_messages: list[dict[str, Any]] = []
-        for trade in open_candidates:
+        for trade in lifecycle.get("open_trades") or []:
             trade_id = str(trade.get("paper_trade_id") or "")
-            if not trade_id or trade_id in open_ids:
+            if not trade_id or trade_id in reported["reported_open_trade_ids"]:
                 continue
-            if str(trade.get("status") or "").upper() != "OPEN":
+            text = _instant_signal_message(trade)
+            digest = _hash_payload({"open": trade_id, "text": text})
+            if digest in reported["reported_open_hashes"]:
+                dedup_suppressed += 1
                 continue
-            pending_open_messages.append(
-                {
-                    "message_type": "INSTANT_SIGNAL",
-                    "paper_trade_id": trade_id,
-                    "status": "PAPER OPENED",
-                    "message_text": _instant_signal_message(trade),
-                }
-            )
-            pending_open_ids.add(trade_id)
+            messages.append({"message_type": "OPEN_SIGNAL", "paper_trade_id": trade_id, "status": "OPEN", "message_text": text, "message_hash": digest})
+            reported["reported_open_trade_ids"].add(trade_id)
+            reported["reported_open_hashes"].add(digest)
 
-        pending_result_messages: list[dict[str, Any]] = []
-        for trade in closed_candidates:
+        for trade in lifecycle.get("trades_closed_this_loop") or []:
             trade_id = str(trade.get("paper_trade_id") or "")
-            status = str(trade.get("status") or trade.get("close_reason") or "").upper()
-            if not trade_id or trade_id in closed_ids or status not in CLOSED_STATUSES:
+            status = str(trade.get("close_reason") or trade.get("status") or "").upper()
+            if not trade_id or trade_id in reported["reported_closed_trade_ids"] or status not in CLOSED_STATUSES:
                 continue
-            pending_result_messages.append(
-                {
-                    "message_type": "TRADE_RESULT",
-                    "paper_trade_id": trade_id,
-                    "status": status,
-                    "message_text": _result_message(trade, lifecycle, feedback, promotion, edge),
-                }
-            )
-            pending_closed_ids.add(trade_id)
-        if len(pending_open_messages) > MAX_INSTANT_SIGNALS or len(pending_result_messages) > MAX_RESULT_ALERTS:
-            backlog_skipped = True
-            reason_codes.append("BACKLOG_SKIPPED_ARCHIVED_OR_CAPPED")
-        messages.extend(pending_open_messages[:MAX_INSTANT_SIGNALS])
-        messages.extend(pending_result_messages[:MAX_RESULT_ALERTS])
-        reason_codes.append(f"PENDING_MESSAGES_{len(messages)}")
+            text = _result_message(trade, accounting)
+            digest = _hash_payload({"closed": trade_id, "text": text})
+            if digest in reported["reported_closed_hashes"]:
+                dedup_suppressed += 1
+                continue
+            messages.append({"message_type": "TRADE_RESULT", "paper_trade_id": trade_id, "status": status, "message_text": text, "message_hash": digest})
+            reported["reported_closed_trade_ids"].add(trade_id)
+            reported["reported_closed_hashes"].add(digest)
     else:
-        messages.append(
-            {
-                "message_type": "SUMMARY",
-                "paper_trade_id": None,
-                "status": "SUMMARY_READY",
-                "message_text": _summary_message(audit, sync, setup, lifecycle, edge, feedback, promotion, live_gate),
-            }
-        )
-        reported["last_summary_sent_at_utc"] = _utc_now()
-        reason_codes.append("SUMMARY_MODE")
+        text, summary_payload = _summary_message(factory, lifecycle, accounting, edge)
+        digest = _hash_payload(summary_payload)
+        if digest != _load_summary_hash():
+            _write_summary_hash(digest, text)
+            messages.append({"message_type": "SUMMARY", "paper_trade_id": None, "status": "SUMMARY_READY", "message_text": text, "message_hash": digest})
+        else:
+            dedup_suppressed = 1
 
-    transport_status, sent_messages = _maybe_send_messages(token, chat_id, messages)
-    if transport_status == "TELEGRAM_NOT_CONFIGURED":
-        reason_codes.append("TELEGRAM_ENV_MISSING")
-    elif transport_status == "SENT":
-        reason_codes.append("TELEGRAM_SENT")
-    elif transport_status == "TELEGRAM_SEND_FAILED":
-        reason_codes.append("TELEGRAM_SEND_FAILED")
+    status = "NO_MESSAGES"
+    if not token or not chat_id:
+        status = "TELEGRAM_NOT_CONFIGURED" if messages else "NO_MESSAGES"
+        for item in messages:
+            item["telegram_status"] = "TELEGRAM_NOT_CONFIGURED"
     else:
-        reason_codes.append("NO_MESSAGE_EMITTED")
-
-    if mode == "instant":
-        open_ids = {str(item) for item in reported.get("reported_open_trade_ids") or [] if item}
-        closed_ids = {str(item) for item in reported.get("reported_closed_trade_ids") or [] if item}
-        for item in sent_messages:
-            if item.get("telegram_status") != "SENT":
-                continue
-            trade_id = str(item.get("paper_trade_id") or "")
-            if not trade_id:
-                continue
-            if item.get("message_type") == "INSTANT_SIGNAL" and trade_id in pending_open_ids:
-                open_ids.add(trade_id)
-            if item.get("message_type") == "TRADE_RESULT" and trade_id in pending_closed_ids:
-                closed_ids.add(trade_id)
-        reported["reported_open_trade_ids"] = sorted(open_ids)
-        reported["reported_closed_trade_ids"] = sorted(closed_ids)
-
-    sent_count = sum(1 for item in sent_messages if item.get("telegram_status") == "SENT")
-    failed_count = sum(1 for item in sent_messages if item.get("telegram_status") == "TELEGRAM_SEND_FAILED")
-    not_configured_count = sum(1 for item in sent_messages if item.get("telegram_status") == "TELEGRAM_NOT_CONFIGURED")
+        for item in messages:
+            try:
+                response = _send_telegram(token, chat_id, item["message_text"])
+                item["telegram_response"] = response
+                item["telegram_status"] = "SENT" if response.get("ok") else "TELEGRAM_SEND_FAILED"
+                status = "SENT" if response.get("ok") else "TELEGRAM_SEND_FAILED"
+            except Exception as exc:
+                item["telegram_status"] = "TELEGRAM_SEND_FAILED"
+                item["error"] = str(exc)[:300]
+                status = "TELEGRAM_SEND_FAILED"
+    _write_reported_state(reported)
 
     output = stamp_payload(
         {
+            "epoch_id": ACTIVE_EPOCH_ID,
+            "block_id": BLOCK_ID,
             "report_mode": mode.upper(),
-            "status": transport_status,
-            "symbol": input_symbol,
-            "message_count": len(sent_messages),
-            "sent_count": sent_count,
-            "failed_count": failed_count,
-            "not_configured_count": not_configured_count,
+            "source": {"source_mode": "EPOCH_V2_SSOT"},
+            "status": status if messages else ("SUPPRESSED_DUPLICATE" if dedup_suppressed else "NO_MESSAGES"),
+            "summary": (_summary_message(factory, lifecycle, accounting, edge)[1] if mode == "summary" else None),
+            "message_count": len(messages),
+            "dedup_suppressed_count": dedup_suppressed,
+            "telegram_configured": bool(token and chat_id),
             "messages": [
                 {
                     "message_type": item.get("message_type"),
                     "paper_trade_id": item.get("paper_trade_id"),
                     "status": item.get("status"),
                     "telegram_status": item.get("telegram_status"),
-                    "telegram_ok": item.get("telegram_ok"),
                 }
-                for item in sent_messages[:10]
+                for item in messages
             ],
-            "reported_open_trade_ids_count": len(reported.get("reported_open_trade_ids") or []),
-            "reported_closed_trade_ids_count": len(reported.get("reported_closed_trade_ids") or []),
-            "telegram_configured": bool(token and chat_id),
-            "backlog_skipped": backlog_skipped,
-            "sanitized_at_utc": sanitized_at_utc,
-            "pre_sanitize_archive_path": lifecycle.get("pre_sanitize_archive_path"),
-            "lifecycle_latest_read_status": lifecycle_read_reason or "OK",
-            "env": {
-                "has_telegram_bot_token": bool(token),
-                "has_telegram_chat_id": bool(chat_id),
+            "data_quality": {
+                "level": "HIGH" if lifecycle and accounting and edge else "MEDIUM",
+                "missing_inputs": [
+                    name for name, payload in {
+                        "epoch_v2/latest_paper_trade_factory.json": factory,
+                        "epoch_v2/latest_research_paper_lifecycle.json": lifecycle,
+                        "epoch_v2/latest_outcome_accounting.json": accounting,
+                        "epoch_v2/latest_research_edge_matrix.json": edge,
+                    }.items() if not payload
+                ],
             },
-            "reason_codes": reason_codes,
+            "reason_codes": [
+                f"MODE_{mode.upper()}",
+                f"STATUS_{status if messages else 'NO_MESSAGES'}",
+                f"MESSAGES_{len(messages)}",
+                "PAPER_ONLY",
+                "NO_LIVE_EXECUTION",
+                "NO_PRIVATE_API",
+            ],
+            "feeds_next": {"next_blocks": []},
             "execution_safety": {
                 "safe_to_open_real_trade": False,
                 "private_api_used": False,
@@ -441,25 +310,28 @@ def run_reporter(mode: str) -> dict[str, Any]:
             },
         },
         BLOCK_ID,
-        input_symbol,
+        str((factory.get("symbol") or lifecycle.get("symbol") or "BTCUSDT")),
         context,
     )
-
-    _write_reported_state(reported)
     write_json(OUTPUT_PATH, output)
-    append_jsonl(HISTORY_PATH, output)
+    append_epoch_jsonl("telegram_report_history.jsonl", output)
     return output
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Telegram research reporter for NurNova paper engine.")
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--instant", action="store_true", help="Send instant paper trade open and result alerts.")
-    mode.add_argument("--summary", action="store_true", help="Send 15-minute research summary.")
-    args = parser.parse_args()
+def run_summary_report() -> dict[str, Any]:
+    return run_reporter("summary")
 
-    selected_mode = "instant" if args.instant else "summary"
-    print(json.dumps(run_reporter(selected_mode), ensure_ascii=False, indent=2))
+
+def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    parser = argparse.ArgumentParser(description="Epoch V2 Telegram research reporter")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--instant", action="store_true")
+    mode.add_argument("--summary", action="store_true")
+    args = parser.parse_args()
+    selected = "instant" if args.instant else "summary"
+    print(json.dumps(run_reporter(selected), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
