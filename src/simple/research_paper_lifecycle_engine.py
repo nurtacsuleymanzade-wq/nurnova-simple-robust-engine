@@ -4,11 +4,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+from src.simple.jsonl_tail_reader import read_jsonl_tail_objects, safe_read_json
 from src.simple.research_runtime import (
     append_jsonl,
     compact_lineage,
     current_runtime_context,
-    history_tail,
     load_json,
     parse_ts,
     safe_float,
@@ -29,6 +29,22 @@ OBSERVATION_PATH = STATE_DIR / "latest_observation_factory.json"
 DNA_PATH = STATE_DIR / "latest_mtf_candle_dna.json"
 
 MAX_OPEN_TRADES = 20
+MAX_RECENT_CLOSED = 20
+MAX_RECENT_INVALID = 20
+MAX_HISTORY_TAIL_ROWS = 5000
+LATEST_FILE_MAX_BYTES = 500_000
+
+
+def _empty_summary() -> dict[str, int]:
+    return {
+        "opened": 0,
+        "open": 0,
+        "closed": 0,
+        "invalid": 0,
+        "tp": 0,
+        "sl": 0,
+        "expired": 0,
+    }
 
 
 def _current_price(observation: dict[str, Any], dna: dict[str, Any]) -> float | None:
@@ -39,11 +55,97 @@ def _current_price(observation: dict[str, Any], dna: dict[str, Any]) -> float | 
 
 
 def _load_previous_snapshot() -> dict[str, Any]:
-    latest = load_json(OUTPUT_PATH)
-    if latest:
+    latest, latest_reason = safe_read_json(OUTPUT_PATH, default={}, max_bytes=LATEST_FILE_MAX_BYTES)
+    if isinstance(latest, dict) and latest:
         return latest
-    tail = history_tail(HISTORY_PATH, max_lines=5)
-    return tail[-1] if tail else {}
+    tail = read_jsonl_tail_objects(HISTORY_PATH, max_lines=5)
+    previous = tail[-1] if tail else {}
+    if latest_reason == "FILE_TOO_LARGE":
+        previous.setdefault("reason_codes", []).append("FILE_TOO_LARGE_SKIPPED")
+    return previous
+
+
+def _count_close_reasons(trades: list[dict[str, Any]]) -> dict[str, int]:
+    tp = 0
+    sl = 0
+    expired = 0
+    invalid = 0
+    for trade in trades:
+        status = str(trade.get("status") or trade.get("close_reason") or "").upper()
+        outcome_status = str(trade.get("outcome_status") or "").upper()
+        if status in {"TP1_HIT", "TP2_HIT"}:
+            tp += 1
+        elif status == "SL_HIT":
+            sl += 1
+        elif status == "EXPIRED":
+            expired += 1
+        if outcome_status == "INVALID":
+            invalid += 1
+    return {"tp": tp, "sl": sl, "expired": expired, "invalid": invalid}
+
+
+def _closed_tail_from_history() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    closed_by_id: dict[str, dict[str, Any]] = {}
+    invalid_by_id: dict[str, dict[str, Any]] = {}
+    for payload in read_jsonl_tail_objects(HISTORY_PATH, max_lines=MAX_HISTORY_TAIL_ROWS):
+        for key, target in (("trades_closed_this_loop", closed_by_id), ("recent_closed", closed_by_id), ("recent_invalid", invalid_by_id)):
+            for trade in payload.get(key) or []:
+                trade_id = str(trade.get("paper_trade_id") or "")
+                if trade_id:
+                    target[trade_id] = dict(trade)
+    closed = sorted(
+        [
+            trade for trade in closed_by_id.values()
+            if str(trade.get("outcome_status") or trade.get("status") or "").upper() == "CLOSED"
+        ],
+        key=lambda item: str(item.get("closed_at_utc") or item.get("timestamp_utc") or ""),
+    )
+    invalid = sorted(
+        [
+            trade for trade in {**closed_by_id, **invalid_by_id}.values()
+            if str(trade.get("outcome_status") or "").upper() == "INVALID"
+        ],
+        key=lambda item: str(item.get("closed_at_utc") or item.get("timestamp_utc") or ""),
+    )
+    return closed[-MAX_RECENT_CLOSED:], invalid[-MAX_RECENT_INVALID:]
+
+
+def _compact_trade(trade: dict[str, Any]) -> dict[str, Any]:
+    keep_fields = (
+        "paper_trade_id",
+        "context_id",
+        "loop_id",
+        "symbol",
+        "model_id",
+        "model_family",
+        "setup_family",
+        "dominant_setup_family",
+        "direction",
+        "entry",
+        "stop_loss",
+        "tp1",
+        "tp2",
+        "risk_distance",
+        "opened_at_utc",
+        "closed_at_utc",
+        "current_price",
+        "exit_price",
+        "status",
+        "close_reason",
+        "outcome_status",
+        "invalid_for_edge",
+        "r_result",
+        "r_unrealized",
+        "mfe",
+        "mae",
+        "reason_codes",
+    )
+    compact = {field: trade.get(field) for field in keep_fields if field in trade}
+    compact["execution_safety"] = {
+        "live_order_sent": False,
+        "private_api_used": False,
+    }
+    return compact
 
 
 def _age_seconds(opened_at: Any, now_ts: str) -> int:
@@ -165,16 +267,22 @@ def run_research_paper_lifecycle_engine() -> dict[str, Any]:
     current_price = _current_price(observation, dna)
 
     previous_open = {str(trade.get("paper_trade_id")): dict(trade) for trade in (previous.get("open_trades") or []) if trade.get("paper_trade_id")}
-    previous_closed = {str(trade.get("paper_trade_id")): dict(trade) for trade in (previous.get("closed_trades") or []) if trade.get("paper_trade_id")}
+    previous_closed_ids = {
+        str(trade.get("paper_trade_id") or "")
+        for trade in [*(previous.get("recent_closed") or []), *(previous.get("recent_invalid") or [])]
+        if str(trade.get("paper_trade_id") or "")
+    }
+    previous_reason_codes = list(previous.get("reason_codes") or [])
 
     new_trades_opened: list[dict[str, Any]] = []
-    for trade in factory.get("paper_trades") or []:
+    factory_candidates = factory.get("newest_opened_this_loop") or factory.get("top_candidate_diagnostics") or factory.get("paper_trades") or []
+    for trade in factory_candidates:
         if str(trade.get("status") or "").upper() not in {"OPEN", "OPEN_CANDIDATE"}:
             continue
         if len(previous_open) >= MAX_OPEN_TRADES:
             break
         trade_id = str(trade.get("paper_trade_id") or "")
-        if not trade_id or trade_id in previous_open or trade_id in previous_closed:
+        if not trade_id or trade_id in previous_open or trade_id in previous_closed_ids:
             continue
         opened = dict(trade)
         opened["status"] = "OPEN"
@@ -185,45 +293,75 @@ def run_research_paper_lifecycle_engine() -> dict[str, Any]:
 
     updated_open: dict[str, dict[str, Any]] = {}
     trades_closed_this_loop: list[dict[str, Any]] = []
-    close_reasons: dict[str, int] = {}
 
     for trade_id, trade in previous_open.items():
         updated_trade = _trade_update(trade, current_price, now_ts)
         updated_trade.update(compact_lineage(trade, factory))
         if updated_trade.get("outcome_status") in {"CLOSED", "INVALID"}:
-            previous_closed[trade_id] = updated_trade
             trades_closed_this_loop.append(updated_trade)
-            reason = str(updated_trade.get("close_reason") or updated_trade.get("status") or "UNKNOWN")
-            close_reasons[reason] = close_reasons.get(reason, 0) + 1
         else:
             updated_open[trade_id] = updated_trade
+
+    recent_closed_history, recent_invalid_history = _closed_tail_from_history()
+    recent_closed_map = {
+        str(trade.get("paper_trade_id") or ""): dict(trade)
+        for trade in [*recent_closed_history, *trades_closed_this_loop]
+        if str(trade.get("paper_trade_id") or "")
+    }
+    recent_invalid_map = {
+        str(trade.get("paper_trade_id") or ""): dict(trade)
+        for trade in [*recent_invalid_history, *trades_closed_this_loop]
+        if str(trade.get("outcome_status") or "").upper() == "INVALID" and str(trade.get("paper_trade_id") or "")
+    }
+    recent_closed = sorted(
+        [trade for trade in recent_closed_map.values() if str(trade.get("outcome_status") or "").upper() == "CLOSED"],
+        key=lambda item: str(item.get("closed_at_utc") or item.get("timestamp_utc") or ""),
+    )[-MAX_RECENT_CLOSED:]
+    recent_invalid = sorted(
+        list(recent_invalid_map.values()),
+        key=lambda item: str(item.get("closed_at_utc") or item.get("timestamp_utc") or ""),
+    )[-MAX_RECENT_INVALID:]
+    open_trades = sorted(
+        [_compact_trade(trade) for trade in updated_open.values()],
+        key=lambda item: str(item.get("opened_at_utc") or item.get("timestamp_utc") or ""),
+    )[-MAX_OPEN_TRADES:]
+    recent_closed_compact = [_compact_trade(trade) for trade in recent_closed]
+    recent_invalid_compact = [_compact_trade(trade) for trade in recent_invalid]
+    closed_counts = _count_close_reasons([*recent_closed, *recent_invalid])
+    latest_reason_codes = [
+        f"OPEN_{len(open_trades)}",
+        f"CLOSED_{len(recent_closed_compact)}",
+        f"PRICE_AVAILABLE_{str(current_price is not None).upper()}",
+        "NO_LIVE_EXECUTION",
+        "NO_PRIVATE_API",
+        "PAPER_ONLY",
+    ]
+    if current_price is None:
+        latest_reason_codes.append("PRICE_MISSING")
+    if "FILE_TOO_LARGE_SKIPPED" in previous_reason_codes:
+        latest_reason_codes.append("FILE_TOO_LARGE_SKIPPED")
 
     output = stamp_payload(
         {
             "symbol": str(observation.get("symbol") or factory.get("symbol") or "BTCUSDT"),
             "block_id": BLOCK_ID,
             "source": {"source_mode": "PAPER_FACTORY_LIFECYCLE"},
-            "open_trades": list(updated_open.values()),
-            "closed_trades": list(previous_closed.values()),
-            "new_trades_opened": new_trades_opened,
-            "trades_closed_this_loop": trades_closed_this_loop,
-            "total_open": len(updated_open),
-            "total_closed": len(previous_closed),
-            "close_reasons": close_reasons,
+            "current_price": current_price,
+            "open_trades": open_trades,
+            "recent_closed": recent_closed_compact,
+            "recent_invalid": recent_invalid_compact,
+            "new_trades_opened": [_compact_trade(trade) for trade in new_trades_opened[:MAX_OPEN_TRADES]],
+            "trades_closed_this_loop": [_compact_trade(trade) for trade in trades_closed_this_loop[-MAX_RECENT_CLOSED:]],
             "summary": {
                 "opened": len(new_trades_opened),
-                "open": len(updated_open),
-                "closed": len(previous_closed),
-                "invalid": len([trade for trade in previous_closed.values() if trade.get("outcome_status") == "INVALID"]),
+                "open": len(open_trades),
+                "closed": len(recent_closed_compact),
+                "invalid": len(recent_invalid_compact),
+                "tp": closed_counts["tp"],
+                "sl": closed_counts["sl"],
+                "expired": closed_counts["expired"],
             },
-            "reason_codes": [
-                f"OPEN_{len(updated_open)}",
-                f"CLOSED_{len(previous_closed)}",
-                f"PRICE_AVAILABLE_{str(current_price is not None).upper()}",
-                "NO_LIVE_EXECUTION",
-                "NO_PRIVATE_API",
-                "PAPER_ONLY",
-            ],
+            "reason_codes": sorted(set(latest_reason_codes)),
             "data_quality": {
                 "level": "HIGH" if factory else "LOW",
                 "missing_inputs": [name for name, payload in {
@@ -242,6 +380,9 @@ def run_research_paper_lifecycle_engine() -> dict[str, Any]:
         str(observation.get("symbol") or factory.get("symbol") or "BTCUSDT"),
         context,
     )
+    for optional_field in ("sanitized_at_utc", "pre_sanitize_archive_path"):
+        if previous.get(optional_field):
+            output[optional_field] = previous.get(optional_field)
 
     write_json(OUTPUT_PATH, output)
     append_jsonl(HISTORY_PATH, output)

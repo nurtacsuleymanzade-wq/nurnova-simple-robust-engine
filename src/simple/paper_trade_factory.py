@@ -8,6 +8,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from src.simple.jsonl_tail_reader import safe_read_json
 from src.simple.research_runtime import (
     append_jsonl,
     current_runtime_context,
@@ -44,6 +45,7 @@ MAX_OPEN_PER_MODEL_ID = 1
 MAX_OPEN_PER_FAMILY_DIRECTION = 3
 NEW_TRADES_CAP_PER_LOOP = 3
 ALLOWED_RESEARCH_BANDS = {"STRONG_ACTIVE", "ACTIVE", "EARLY_RESEARCH"}
+MAX_TOP_CANDIDATES = 20
 
 
 def _current_price(observation: dict[str, Any], dna: dict[str, Any]) -> float | None:
@@ -385,6 +387,34 @@ def _build_trade(
     }
 
 
+def _compact_trade_snapshot(trade: dict[str, Any]) -> dict[str, Any]:
+    keep_fields = (
+        "paper_trade_id",
+        "context_id",
+        "loop_id",
+        "symbol",
+        "model_id",
+        "model_family",
+        "setup_family",
+        "dominant_setup_family",
+        "direction",
+        "entry",
+        "stop_loss",
+        "tp1",
+        "tp2",
+        "risk_distance",
+        "status",
+        "invalid_reason",
+        "activation_band",
+        "activation_score",
+        "reason_codes",
+        "opened_at_utc",
+        "max_holding_seconds",
+        "invalid_for_edge",
+    )
+    return {field: trade.get(field) for field in keep_fields if field in trade}
+
+
 def run_paper_trade_factory() -> dict[str, Any]:
     context = current_runtime_context()
     hunter = load_json(MODEL_HUNTER_PATH) or {}
@@ -397,7 +427,8 @@ def run_paper_trade_factory() -> dict[str, Any]:
     liquidity = load_json(LIQUIDITY_PATH) or {}
     business_zone = load_json(BUSINESS_ZONE_PATH) or {}
     atr = load_json(ATR_PATH) or {}
-    lifecycle = load_json(RESEARCH_LIFECYCLE_PATH) or {}
+    lifecycle, lifecycle_reason = safe_read_json(RESEARCH_LIFECYCLE_PATH, default={}, max_bytes=500_000)
+    lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
 
     current_price = _current_price(observation, dna)
     atr_1m = safe_float(((atr.get("1m") or {}).get("atr_14")))
@@ -518,6 +549,12 @@ def run_paper_trade_factory() -> dict[str, Any]:
         trades.append(trade)
 
     paper_safety["allowed_research_band_counts"] = dict(allowed_research_band_counts)
+    newest_opened_this_loop = [
+        _compact_trade_snapshot(trade)
+        for trade in trades
+        if str(trade.get("status") or "").upper() == "OPEN"
+    ][:MAX_TOP_CANDIDATES]
+    top_candidate_diagnostics = [_compact_trade_snapshot(trade) for trade in trades[:MAX_TOP_CANDIDATES]]
 
     output = stamp_payload({
         "symbol": str(observation.get("symbol") or semantic.get("symbol") or hunter.get("symbol") or "BTCUSDT"),
@@ -525,7 +562,8 @@ def run_paper_trade_factory() -> dict[str, Any]:
         "source": {
             "source_mode": source_selection_mode,
         },
-        "paper_trades": trades,
+        "newest_opened_this_loop": newest_opened_this_loop,
+        "top_candidate_diagnostics": top_candidate_diagnostics,
         "paper_safety": paper_safety,
         "summary": {
             "candidate_models": len(hunter.get("detected_models") or []),
@@ -538,6 +576,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
             "invalid_candidates": len([trade for trade in trades if trade.get("status") == "INVALID"]),
             "blocked_candidates": len([trade for trade in trades if trade.get("status") == "BLOCKED"]),
             "existing_open_trades": len(open_trades),
+            "lifecycle_latest_read_status": lifecycle_reason or "OK",
         },
         "reason_codes": [
             f"PAPER_TRADES_{len(trades)}",
@@ -562,13 +601,10 @@ def run_paper_trade_factory() -> dict[str, Any]:
                 "latest_research_paper_lifecycle": lifecycle,
             }.items() if not payload],
         },
-        "raw_model_observability": {
-            "raw_detected_models": list(hunter.get("detected_models") or []),
-            "validated_models": list(semantic.get("validated_models") or []),
-            "blocked_semantic_models": list(semantic.get("blocked_models") or []),
-            "clusters": list(clusters.get("clusters") or []),
-            "cooldown_blocked_clusters": list(cooldown.get("blocked_clusters") or []),
-            "setup_family_activation": activation,
+        "current_open_summary": {
+            "existing_open_trades": len(open_trades),
+            "open_by_model_id": dict(open_by_model_id),
+            "open_by_family_direction": dict(open_by_family_direction),
         },
         "feeds_next": [
             "RESEARCH_PAPER_LIFECYCLE_ENGINE",

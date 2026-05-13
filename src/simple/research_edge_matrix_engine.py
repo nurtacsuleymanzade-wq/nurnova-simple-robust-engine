@@ -4,10 +4,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from src.simple.jsonl_tail_reader import read_jsonl_tail_objects
 from src.simple.research_runtime import (
     append_jsonl,
     current_runtime_context,
-    history_tail,
     safe_float,
     stamp_payload,
     write_json,
@@ -20,6 +20,8 @@ DATA_DIR = Path("data/simple")
 OUTPUT_PATH = STATE_DIR / "latest_research_edge_matrix.json"
 HISTORY_PATH = DATA_DIR / "research_edge_matrix_history.jsonl"
 LIFECYCLE_HISTORY_PATH = DATA_DIR / "research_paper_lifecycle_history.jsonl"
+MAX_LIFECYCLE_TAIL_ROWS = 5000
+MAX_GROUPS_IN_LATEST = 20
 
 GROUP_FIELDS = (
     "model_id",
@@ -50,10 +52,10 @@ def _edge_maturity(sample_size: int, expectancy: float | None) -> tuple[str, str
 
 
 def _load_closed_trades() -> list[dict[str, Any]]:
-    payloads = history_tail(LIFECYCLE_HISTORY_PATH, max_lines=500)
+    payloads = read_jsonl_tail_objects(LIFECYCLE_HISTORY_PATH, max_lines=MAX_LIFECYCLE_TAIL_ROWS)
     closed_by_id: dict[str, dict[str, Any]] = {}
     for payload in payloads:
-        for trade in payload.get("closed_trades") or []:
+        for trade in payload.get("trades_closed_this_loop") or payload.get("recent_closed") or []:
             trade_id = str(trade.get("paper_trade_id") or "")
             if trade_id:
                 closed_by_id[trade_id] = trade
@@ -171,7 +173,10 @@ def run_research_edge_matrix_engine() -> dict[str, Any]:
         reverse=True,
     )
     best_group = groups_output[0] if groups_output else None
-    edge_status = best_group.get("edge_status") if best_group else "NO_CLOSED_SAMPLES"
+    if not clean_samples:
+        edge_status = "NO_CLOSED_SAMPLES" if not closed_trades else "SAMPLE_BUILDING"
+    else:
+        edge_status = best_group.get("edge_status") if best_group else "SAMPLE_BUILDING"
     best_expectancy = best_group.get("expectancy") if best_group else None
 
     output = stamp_payload(
@@ -179,7 +184,7 @@ def run_research_edge_matrix_engine() -> dict[str, Any]:
             "symbol": "BTCUSDT",
             "block_id": BLOCK_ID,
             "source": {"source_mode": "RESEARCH_PAPER_LIFECYCLE_HISTORY"},
-            "groups": groups_output,
+            "groups": groups_output[:MAX_GROUPS_IN_LATEST],
             "summary": {
                 "group_count": len(groups_output),
                 "closed_trade_count": len(closed_trades),

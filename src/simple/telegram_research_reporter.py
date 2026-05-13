@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib import parse, request
 
+from src.simple.jsonl_tail_reader import safe_read_json
 from src.simple.research_runtime import append_jsonl, current_runtime_context, load_json, parse_ts, safe_float, stamp_payload, write_json
 
 BLOCK_ID = "TELEGRAM_RESEARCH_REPORTER"
@@ -31,6 +32,9 @@ HISTORY_PATH = DATA_DIR / "telegram_report_history.jsonl"
 
 CLOSED_STATUSES = {"TP1_HIT", "TP2_HIT", "SL_HIT", "EXPIRED"}
 UTC_PLUS_4 = timezone(timedelta(hours=4))
+MAX_INSTANT_SIGNALS = 5
+MAX_RESULT_ALERTS = 5
+MAX_REPORTED_IDS = 5000
 
 
 def _utc_now() -> str:
@@ -63,8 +67,8 @@ def _write_reported_state(state: dict[str, Any]) -> None:
     write_json(
         REPORTED_TRADES_PATH,
         {
-            "reported_open_trade_ids": sorted({str(item) for item in state.get("reported_open_trade_ids") or [] if item}),
-            "reported_closed_trade_ids": sorted({str(item) for item in state.get("reported_closed_trade_ids") or [] if item}),
+            "reported_open_trade_ids": sorted({str(item) for item in state.get("reported_open_trade_ids") or [] if item})[-MAX_REPORTED_IDS:],
+            "reported_closed_trade_ids": sorted({str(item) for item in state.get("reported_closed_trade_ids") or [] if item})[-MAX_REPORTED_IDS:],
             "last_summary_sent_at_utc": state.get("last_summary_sent_at_utc"),
             "updated_at_utc": _utc_now(),
         },
@@ -136,18 +140,33 @@ def _summary_bottleneck(audit: dict[str, Any], sync: dict[str, Any], promotion: 
 
 
 def _closed_stats(lifecycle: dict[str, Any]) -> dict[str, Any]:
-    closed = list(lifecycle.get("closed_trades") or [])
-    tp_count = sum(1 for trade in closed if str(trade.get("status") or trade.get("close_reason") or "").upper() in {"TP1_HIT", "TP2_HIT"})
-    sl_count = sum(1 for trade in closed if str(trade.get("status") or trade.get("close_reason") or "").upper() == "SL_HIT")
-    expired_count = sum(1 for trade in closed if str(trade.get("status") or trade.get("close_reason") or "").upper() == "EXPIRED")
-    winrate = round(tp_count / len(closed), 4) if closed else None
+    summary = lifecycle.get("summary") or {}
+    closed = int(summary.get("closed") or len(lifecycle.get("recent_closed") or []))
+    tp_count = int(summary.get("tp") or 0)
+    sl_count = int(summary.get("sl") or 0)
+    expired_count = int(summary.get("expired") or 0)
+    winrate = round(tp_count / closed, 4) if closed else None
     return {
-        "closed_count": len(closed),
+        "closed_count": closed,
         "tp_count": tp_count,
         "sl_count": sl_count,
         "expired_count": expired_count,
         "winrate": winrate,
     }
+
+
+def _is_trade_after_sanitize(trade: dict[str, Any], sanitized_at_utc: str | None) -> bool:
+    if not sanitized_at_utc:
+        return True
+    cutoff = parse_ts(sanitized_at_utc)
+    trade_ts = parse_ts(
+        trade.get("closed_at_utc")
+        or trade.get("opened_at_utc")
+        or trade.get("timestamp_utc")
+    )
+    if cutoff is None or trade_ts is None:
+        return False
+    return trade_ts >= cutoff
 
 
 def _instant_signal_message(trade: dict[str, Any]) -> str:
@@ -265,7 +284,8 @@ def run_reporter(mode: str) -> dict[str, Any]:
     observation = load_json(OBSERVATION_PATH) or {}
     setup = load_json(SETUP_ACTIVATION_PATH) or {}
     factory = load_json(PAPER_TRADE_FACTORY_PATH) or {}
-    lifecycle = load_json(LIFECYCLE_PATH) or {}
+    lifecycle, lifecycle_read_reason = safe_read_json(LIFECYCLE_PATH, default={}, max_bytes=500_000)
+    lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
     edge = load_json(EDGE_PATH) or {}
     feedback = load_json(FEEDBACK_PATH) or {}
     promotion = load_json(PROMOTION_PATH) or {}
@@ -286,6 +306,8 @@ def run_reporter(mode: str) -> dict[str, Any]:
     reason_codes = ["PAPER_ONLY", "NO_LIVE_EXECUTION", "NO_PRIVATE_API"]
     pending_open_ids: set[str] = set()
     pending_closed_ids: set[str] = set()
+    sanitized_at_utc = lifecycle.get("sanitized_at_utc")
+    backlog_skipped = False
 
     if mode == "instant":
         open_ids = {str(item) for item in reported.get("reported_open_trade_ids") or [] if item}
@@ -296,15 +318,19 @@ def run_reporter(mode: str) -> dict[str, Any]:
         if not open_candidates:
             open_candidates = list(lifecycle.get("open_trades") or [])
         if not closed_candidates:
-            closed_candidates = list(lifecycle.get("closed_trades") or [])
+            closed_candidates = list(lifecycle.get("recent_closed") or [])
 
+        open_candidates = [trade for trade in open_candidates if _is_trade_after_sanitize(trade, sanitized_at_utc)]
+        closed_candidates = [trade for trade in closed_candidates if _is_trade_after_sanitize(trade, sanitized_at_utc)]
+
+        pending_open_messages: list[dict[str, Any]] = []
         for trade in open_candidates:
             trade_id = str(trade.get("paper_trade_id") or "")
             if not trade_id or trade_id in open_ids:
                 continue
             if str(trade.get("status") or "").upper() != "OPEN":
                 continue
-            messages.append(
+            pending_open_messages.append(
                 {
                     "message_type": "INSTANT_SIGNAL",
                     "paper_trade_id": trade_id,
@@ -314,12 +340,13 @@ def run_reporter(mode: str) -> dict[str, Any]:
             )
             pending_open_ids.add(trade_id)
 
+        pending_result_messages: list[dict[str, Any]] = []
         for trade in closed_candidates:
             trade_id = str(trade.get("paper_trade_id") or "")
             status = str(trade.get("status") or trade.get("close_reason") or "").upper()
             if not trade_id or trade_id in closed_ids or status not in CLOSED_STATUSES:
                 continue
-            messages.append(
+            pending_result_messages.append(
                 {
                     "message_type": "TRADE_RESULT",
                     "paper_trade_id": trade_id,
@@ -328,6 +355,11 @@ def run_reporter(mode: str) -> dict[str, Any]:
                 }
             )
             pending_closed_ids.add(trade_id)
+        if len(pending_open_messages) > MAX_INSTANT_SIGNALS or len(pending_result_messages) > MAX_RESULT_ALERTS:
+            backlog_skipped = True
+            reason_codes.append("BACKLOG_SKIPPED_ARCHIVED_OR_CAPPED")
+        messages.extend(pending_open_messages[:MAX_INSTANT_SIGNALS])
+        messages.extend(pending_result_messages[:MAX_RESULT_ALERTS])
         reason_codes.append(f"PENDING_MESSAGES_{len(messages)}")
     else:
         messages.append(
@@ -380,25 +412,26 @@ def run_reporter(mode: str) -> dict[str, Any]:
             "sent_count": sent_count,
             "failed_count": failed_count,
             "not_configured_count": not_configured_count,
-            "messages": sent_messages,
+            "messages": [
+                {
+                    "message_type": item.get("message_type"),
+                    "paper_trade_id": item.get("paper_trade_id"),
+                    "status": item.get("status"),
+                    "telegram_status": item.get("telegram_status"),
+                    "telegram_ok": item.get("telegram_ok"),
+                }
+                for item in sent_messages[:10]
+            ],
             "reported_open_trade_ids_count": len(reported.get("reported_open_trade_ids") or []),
             "reported_closed_trade_ids_count": len(reported.get("reported_closed_trade_ids") or []),
             "telegram_configured": bool(token and chat_id),
+            "backlog_skipped": backlog_skipped,
+            "sanitized_at_utc": sanitized_at_utc,
+            "pre_sanitize_archive_path": lifecycle.get("pre_sanitize_archive_path"),
+            "lifecycle_latest_read_status": lifecycle_read_reason or "OK",
             "env": {
                 "has_telegram_bot_token": bool(token),
                 "has_telegram_chat_id": bool(chat_id),
-            },
-            "source_state": {
-                "latest_system_audit": SYSTEM_AUDIT_PATH.as_posix(),
-                "latest_context_sync": CONTEXT_SYNC_PATH.as_posix(),
-                "latest_observation_factory": OBSERVATION_PATH.as_posix(),
-                "latest_setup_family_activation": SETUP_ACTIVATION_PATH.as_posix(),
-                "latest_paper_trade_factory": PAPER_TRADE_FACTORY_PATH.as_posix(),
-                "latest_research_paper_lifecycle": LIFECYCLE_PATH.as_posix(),
-                "latest_research_edge_matrix": EDGE_PATH.as_posix(),
-                "latest_model_feedback": FEEDBACK_PATH.as_posix(),
-                "latest_model_promotion": PROMOTION_PATH.as_posix(),
-                "latest_live_eligibility_gate": LIVE_GATE_PATH.as_posix(),
             },
             "reason_codes": reason_codes,
             "execution_safety": {

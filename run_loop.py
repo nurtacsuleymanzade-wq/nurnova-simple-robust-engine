@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parent
 STATE_DIR = ROOT / "state" / "simple"
@@ -22,7 +23,21 @@ CANONICAL_RUNTIME = "run_loop.py"
 LOCK_PATH = STATE_DIR / "runtime_loop.lock"
 TOPOLOGY_REPORT_PATH = ROOT / "runtime_topology_report.json"
 LIVE_LOG_PATH = ROOT / "live.log"
+LATEST_PIPELINE_FAILURE_PATH = STATE_DIR / "latest_pipeline_failure.json"
 REQUIRED_LIVE_LOG_TERMS = ("SEMANTIC", "CLUST", "SETUP_ACT", "PAPER", "EDGE")
+LOCK_STALE_SECONDS = 300
+PIPELINE_OUTPUT_TAIL_CHARS = 12000
+IGNORED_DUPLICATE_CMDLINE_PATTERNS = (
+    "grep ",
+    " rg ",
+    " tee ",
+    " cron",
+    "crond",
+    "--report",
+    " reporter",
+    "runtime_topology_report",
+    "telegram_research_reporter",
+)
 
 
 class _TeeStdout:
@@ -88,6 +103,21 @@ def _write_json(path: pathlib.Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _parse_utc_timestamp(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _seconds_since(dt: datetime | None) -> float | None:
+    if dt is None:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())
+
+
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -137,9 +167,19 @@ def _scan_proc_run_loops() -> tuple[list[dict], list[str]]:
             continue
         matches.append({
             "pid": int(entry.name),
+            "parent_pid": _read_proc_parent_pid(entry / "status"),
             "cmdline": cmdline,
         })
     return matches, errors
+
+
+def _read_proc_parent_pid(status_path: pathlib.Path) -> int:
+    try:
+        status = status_path.read_text(encoding="utf-8", errors="ignore")
+        ppid_line = next((line for line in status.splitlines() if line.startswith("PPid:")), "")
+        return int(ppid_line.split()[1])
+    except Exception:
+        return 0
 
 
 def _scan_windows_run_loops() -> tuple[list[dict], list[str]]:
@@ -181,6 +221,98 @@ def _scan_run_loop_processes() -> tuple[list[dict], list[str]]:
     if os.name == "nt":
         return _scan_windows_run_loops()
     return _scan_proc_run_loops()
+
+
+def _normalize_cmdline(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _is_ignored_duplicate_candidate(process: dict[str, Any]) -> bool:
+    cmdline = f" {_normalize_cmdline(process.get('cmdline')).lower()} "
+    return any(pattern in cmdline for pattern in IGNORED_DUPLICATE_CMDLINE_PATTERNS)
+
+
+def _build_process_index(processes: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    return {
+        int(process.get("pid") or 0): process
+        for process in processes
+        if int(process.get("pid") or 0) > 0
+    }
+
+
+def _is_ancestor_pid(candidate_pid: int, child_pid: int, process_index: dict[int, dict[str, Any]]) -> bool:
+    visited: set[int] = set()
+    current_pid = child_pid
+    while current_pid and current_pid not in visited:
+        visited.add(current_pid)
+        record = process_index.get(current_pid)
+        if record is None:
+            return False
+        parent_pid = int(record.get("parent_pid") or 0)
+        if parent_pid == candidate_pid:
+            return True
+        current_pid = parent_pid
+    return False
+
+
+def _is_parent_child_related(candidate_pid: int, current_pid: int, process_index: dict[int, dict[str, Any]]) -> bool:
+    return (
+        candidate_pid == current_pid
+        or _is_ancestor_pid(candidate_pid, current_pid, process_index)
+        or _is_ancestor_pid(current_pid, candidate_pid, process_index)
+    )
+
+
+def _read_lock_age_seconds(lock_payload: dict[str, Any]) -> float | None:
+    timestamp_fields = (
+        lock_payload.get("heartbeat_utc"),
+        lock_payload.get("started_at_utc"),
+    )
+    for raw in timestamp_fields:
+        age = _seconds_since(_parse_utc_timestamp(raw))
+        if age is not None:
+            return age
+    try:
+        return max(0.0, time.time() - LOCK_PATH.stat().st_mtime)
+    except Exception:
+        return None
+
+
+def _refresh_runtime_lock() -> None:
+    lock_payload = _read_json(LOCK_PATH)
+    if int(lock_payload.get("pid") or 0) != os.getpid():
+        return
+    lock_payload["heartbeat_utc"] = utc_now()
+    _write_json(LOCK_PATH, lock_payload)
+
+
+def _filter_duplicate_processes(
+    detected_processes: list[dict[str, Any]],
+    *,
+    relation_processes: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    current_pid = os.getpid()
+    process_index = _build_process_index(relation_processes or detected_processes)
+    filtered: list[dict[str, Any]] = []
+    seen_pids: set[int] = set()
+    for process in detected_processes:
+        pid = int(process.get("pid") or 0)
+        if pid <= 0 or pid == current_pid:
+            continue
+        if pid in seen_pids:
+            continue
+        if _is_ignored_duplicate_candidate(process):
+            continue
+        if _is_parent_child_related(pid, current_pid, process_index):
+            continue
+        seen_pids.add(pid)
+        filtered.append({
+            "pid": pid,
+            "parent_pid": int(process.get("parent_pid") or 0),
+            "cmdline": _normalize_cmdline(process.get("cmdline")),
+            "source": process.get("source", "process_scan"),
+        })
+    return filtered
 
 
 def _scan_child_processes() -> tuple[list[dict], list[str]]:
@@ -304,20 +436,20 @@ def _acquire_runtime_lock() -> tuple[bool, dict]:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     current_pid = os.getpid()
     detected_processes, process_scan_errors = _scan_run_loop_processes()
-    duplicate_processes = [
-        process
-        for process in detected_processes
-        if int(process.get("pid") or 0) not in {0, current_pid}
-    ]
+    duplicate_processes = _filter_duplicate_processes(detected_processes)
     duplicate_loop_detected = bool(duplicate_processes)
     duplicate_loop_fixed = False
 
     existing_lock = _read_json(LOCK_PATH)
     existing_pid = int(existing_lock.get("pid") or 0)
+    existing_lock_age_seconds = _read_lock_age_seconds(existing_lock)
     if existing_pid and existing_pid != current_pid:
-        if _pid_alive(existing_pid):
+        lock_pid_seen = any(existing_pid == int(process.get("pid") or 0) for process in detected_processes)
+        lock_is_stale = bool(existing_lock_age_seconds is not None and existing_lock_age_seconds > LOCK_STALE_SECONDS)
+        if _pid_alive(existing_pid) and (lock_pid_seen or not lock_is_stale):
             duplicate_processes.append({
                 "pid": existing_pid,
+                "parent_pid": int(existing_lock.get("parent_pid") or 0),
                 "cmdline": existing_lock.get("cmdline", "LOCK_FILE_OWNER"),
                 "source": "runtime_loop.lock",
             })
@@ -328,6 +460,12 @@ def _acquire_runtime_lock() -> tuple[bool, dict]:
                 duplicate_loop_fixed = True
             except FileNotFoundError:
                 pass
+
+    duplicate_processes = _filter_duplicate_processes(
+        duplicate_processes,
+        relation_processes=[*detected_processes, *duplicate_processes],
+    )
+    duplicate_loop_detected = bool(duplicate_processes)
 
     if duplicate_loop_detected:
         _write_runtime_topology_report(
@@ -347,7 +485,9 @@ def _acquire_runtime_lock() -> tuple[bool, dict]:
 
     lock_payload = {
         "pid": current_pid,
+        "parent_pid": os.getppid(),
         "started_at_utc": utc_now(),
+        "heartbeat_utc": utc_now(),
         "canonical_runtime": CANONICAL_RUNTIME,
         "cmdline": " ".join(sys.argv),
     }
@@ -388,6 +528,60 @@ def _release_runtime_lock() -> None:
         LOCK_PATH.unlink()
     except FileNotFoundError:
         pass
+
+
+def _tail_output(text: str) -> str:
+    text = text or ""
+    if len(text) <= PIPELINE_OUTPUT_TAIL_CHARS:
+        return text
+    return text[-PIPELINE_OUTPUT_TAIL_CHARS:]
+
+
+def _record_pipeline_failure(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    stdout_tail = _tail_output(result.stdout or "")
+    stderr_tail = _tail_output(result.stderr or "")
+    combined_tail = f"{stdout_tail}\n{stderr_tail}".lower()
+    oom_or_killed = result.returncode == 137 or "killed" in combined_tail
+    payload = {
+        "timestamp_utc": utc_now(),
+        "command": [sys.executable, "-m", "src.simple.run_local_full_pipeline"],
+        "return_code": result.returncode,
+        "last_stdout": stdout_tail,
+        "last_stderr": stderr_tail,
+        "oom_or_process_killed": oom_or_killed,
+        "execution_safety": {
+            "safe_to_open_real_trade": False,
+            "private_api_used": False,
+            "live_order_sent": False,
+        },
+    }
+    _write_json(LATEST_PIPELINE_FAILURE_PATH, payload)
+    if oom_or_killed:
+        print("OOM_OR_PROCESS_KILLED", flush=True)
+        for item in _largest_runtime_files(limit=20):
+            print(f"LARGEST_FILE path={item['path']} size_bytes={item['size_bytes']}", flush=True)
+    print("PIPELINE_SUBPROCESS_FAILED", flush=True)
+    print(f"return_code={payload['return_code']}", flush=True)
+    print(f"last_stdout={payload['last_stdout'] or '<empty>'}", flush=True)
+    print(f"last_stderr={payload['last_stderr'] or '<empty>'}", flush=True)
+    return payload
+
+
+def _largest_runtime_files(limit: int = 20) -> list[dict[str, Any]]:
+    files: list[dict[str, Any]] = []
+    for root_dir in (STATE_DIR, DATA_DIR):
+        if not root_dir.exists():
+            continue
+        for path in root_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                size = path.stat().st_size
+            except Exception:
+                continue
+            files.append({"path": str(path), "size_bytes": size})
+    files.sort(key=lambda item: int(item.get("size_bytes") or 0), reverse=True)
+    return files[:limit]
 
 
 def _fmt_value(value: object) -> str:
@@ -435,11 +629,20 @@ def run_once() -> dict:
         text=True,
     )
     if result.returncode != 0:
+        failure_payload = _record_pipeline_failure(result)
         return {
-            "error": (result.stderr or result.stdout or "pipeline subprocess failed")[:1000],
+            "error": "PIPELINE_SUBPROCESS_FAILED",
             "returncode": result.returncode,
+            "last_stdout": failure_payload["last_stdout"],
+            "last_stderr": failure_payload["last_stderr"],
+            "oom_or_process_killed": failure_payload["oom_or_process_killed"],
         }
     try:
+        if LATEST_PIPELINE_FAILURE_PATH.exists():
+            try:
+                LATEST_PIPELINE_FAILURE_PATH.unlink()
+            except FileNotFoundError:
+                pass
         return json.loads(result.stdout)
     except Exception:
         return {"error": result.stderr or result.stdout or "bos cikti"}
@@ -625,6 +828,8 @@ def main() -> None:
                 data = run_once()
                 print_summary(data, cycle)
                 _trigger_telegram_instant_report()
+                if data.get("oom_or_process_killed"):
+                    break
             except KeyboardInterrupt:
                 print("\nDongu durduruldu.", flush=True)
                 break
@@ -640,6 +845,7 @@ def main() -> None:
                 process_scan_errors=list(topology.get("process_scan_errors") or []),
                 lock_status="RUNNING",
             )
+            _refresh_runtime_lock()
 
             if max_cycles is not None and cycle >= max_cycles:
                 break

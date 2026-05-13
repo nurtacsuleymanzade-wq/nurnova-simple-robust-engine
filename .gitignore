@@ -16,6 +16,15 @@ data/
 state/
 logs/
 reports/
+*.log
+live.log
+telegram_summary.log
+pipeline_direct_debug.log
+runtime_topology_report.json
+archive/
+state/simple/runtime_loop.lock
+state/simple/telegram_reported_trades.json
+state/simple/latest_pipeline_failure.json
 
 # =========================
 # LOCAL ENV

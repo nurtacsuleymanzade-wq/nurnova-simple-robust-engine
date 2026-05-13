@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from src.simple.jsonl_tail_reader import (
+    append_jsonl_atomic,
+    read_jsonl_tail_objects,
+    safe_read_json,
+    safe_write_json_atomic,
+)
 
 STATE_DIR = Path("state/simple")
 RUNTIME_CONTEXT_PATH = STATE_DIR / "latest_runtime_context.json"
@@ -44,24 +50,16 @@ def safe_float(value: Any) -> float | None:
 
 
 def load_json(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    payload, _reason = safe_read_json(path, default=None)
     return payload if isinstance(payload, dict) else None
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    safe_write_json_atomic(path, payload)
 
 
 def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    append_jsonl_atomic(path, payload)
 
 
 def parse_ts(value: Any) -> datetime | None:
@@ -75,37 +73,7 @@ def parse_ts(value: Any) -> datetime | None:
 
 
 def history_tail(path: Path, max_lines: int = 200) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    try:
-        with path.open("rb") as handle:
-            handle.seek(0, 2)
-            end = handle.tell()
-            chunk_size = 4096
-            buffer = b""
-            line_count = 0
-            position = end
-            while position > 0 and line_count <= max_lines:
-                read_size = min(chunk_size, position)
-                position -= read_size
-                handle.seek(position)
-                buffer = handle.read(read_size) + buffer
-                line_count = buffer.count(b"\n")
-            lines = buffer.decode("utf-8", errors="ignore").splitlines()
-    except Exception:
-        return []
-    result: list[dict[str, Any]] = []
-    for line in lines[-max_lines:]:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            payload = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(payload, dict):
-            result.append(payload)
-    return result
+    return read_jsonl_tail_objects(path, max_lines=max_lines)
 
 
 def initialize_runtime_context(symbol: str) -> dict[str, Any]:
