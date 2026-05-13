@@ -255,6 +255,36 @@ def print_summary(data: dict, cycle: int) -> None:
             f"| missing={missing_text}"
         )
 
+    model_hunter = _read_json(STATE_DIR / "latest_model_hunter.json")
+    if model_hunter:
+        summary = model_hunter.get("summary") or {}
+        print(
+            f"  MODELS   : detected={summary.get('detected_count', 0)} "
+            f"no_trade={summary.get('no_trade_count', 0)} "
+            f"top={summary.get('top_model_id', 'UNKNOWN')} "
+            f"quality={summary.get('top_model_quality', 'UNKNOWN')} "
+            f"score={_fmt_value(summary.get('top_model_score'))}"
+        )
+
+    research_lifecycle = _read_json(STATE_DIR / "latest_research_paper_lifecycle.json")
+    if research_lifecycle:
+        print(
+            f"  PAPER    : opened={len(research_lifecycle.get('new_trades_opened') or [])} "
+            f"open={research_lifecycle.get('total_open', 0)} "
+            f"closed={research_lifecycle.get('total_closed', 0)}"
+        )
+
+    research_edge = _read_json(STATE_DIR / "latest_research_edge_matrix.json")
+    if research_edge:
+        summary = research_edge.get("summary") or {}
+        print(
+            f"  REDGE    : best={summary.get('best_model_id', 'UNKNOWN')} "
+            f"sample={summary.get('best_sample_size', 0)} "
+            f"winrate={_fmt_value(summary.get('best_winrate'))} "
+            f"expectancy={_fmt_value(summary.get('best_expectancy'))} "
+            f"maturity={summary.get('best_maturity', 'UNKNOWN')}"
+        )
+
     # --- Setup candidate ---
     sc = _read_json(STATE_DIR / "latest_setup_candidate.json")
     if sc:

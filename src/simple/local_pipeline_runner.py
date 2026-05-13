@@ -57,6 +57,11 @@ _STAGES: list[tuple[str, str, str]] = [
     ("src.simple.double_distribution_reversal_engine", "NOARG",      "DOUBLE_DISTRIBUTION_REVERSAL_ENGINE"),
     ("src.simple.trap_trader_engine",             "NOARG",           "TRAP_TRADER_ENGINE"),
     ("src.simple.unified_context_engine",         "NOARG",           "UNIFIED_CONTEXT_ENGINE"),
+    ("src.simple.model_definition_registry",      "NOARG",           "MODEL_DEFINITION_REGISTRY"),
+    ("src.simple.model_hunter_engine",            "NOARG",           "MODEL_HUNTER_ENGINE"),
+    ("src.simple.paper_trade_factory",            "NOARG",           "PAPER_TRADE_FACTORY"),
+    ("src.simple.research_paper_lifecycle_engine","NOARG",           "RESEARCH_PAPER_LIFECYCLE_ENGINE"),
+    ("src.simple.research_edge_matrix_engine",    "NOARG",           "RESEARCH_EDGE_MATRIX_ENGINE"),
     ("src.simple.flow_to_setup_context_engine",   "NOARG",           "S15_FLOW_TO_SETUP_CONTEXT"),
     # --- Model layer (after S15, before S16) ---
     ("src.simple.absorption_reversal_engine",     "NOARG",           "AR01_ABSORPTION_REVERSAL"),
