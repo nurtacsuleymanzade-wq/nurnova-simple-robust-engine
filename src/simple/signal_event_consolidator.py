@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.core.model_survival_registry import load_model_survival_registry, split_active_quarantined, update_model_survival_report
 from src.simple.research_epoch import ACTIVE_EPOCH_ID, append_epoch_jsonl, epoch_data_path, epoch_state_path
 from src.simple.research_runtime import current_runtime_context, load_json, safe_float, source_state_refs_from_paths, stamp_payload, write_json
 
@@ -129,8 +130,12 @@ def run_signal_event_consolidator() -> dict[str, Any]:
     factory = load_json(FACTORY_PATH) or {}
     grade_payload = load_json(GRADE_PATH) or {}
     grade_map = _grade_by_trade_id(grade_payload)
+    registry = load_model_survival_registry()
+    raw_factory_trades = list(factory.get("newest_opened_this_loop") or factory.get("top_candidate_diagnostics") or [])
+    filtered_factory_trades, blocked_trades = split_active_quarantined(raw_factory_trades, BLOCK_ID)
+    survival_report = update_model_survival_report(location=BLOCK_ID, allowed_count=len(filtered_factory_trades), blocked_items=blocked_trades, registry=registry)
     trades = []
-    for trade in factory.get("newest_opened_this_loop") or factory.get("top_candidate_diagnostics") or []:
+    for trade in filtered_factory_trades:
         trades.append(enrich_trade_event_fields(dict(trade), grade_map.get(str(trade.get("paper_trade_id") or ""))))
     grouped: dict[str, list[dict[str, Any]]] = {}
     bucket_directions: dict[str, set[str]] = {}
@@ -150,6 +155,7 @@ def run_signal_event_consolidator() -> dict[str, Any]:
             "events": events[:50],
             "summary": {
                 "source_trade_count": len(trades),
+                "model_survival_blocked_count": len(blocked_trades),
                 "event_count": len(events),
                 "duplicate_event_count": max(0, len(trades) - len(events)),
                 "opposite_direction_bucket_count": sum(1 for values in bucket_directions.values() if len(values) > 1),
@@ -157,6 +163,7 @@ def run_signal_event_consolidator() -> dict[str, Any]:
             },
             "data_quality": {"level": "HIGH" if factory else "MEDIUM", "missing_inputs": [name for name, payload in {"paper_trade_factory": factory, "signal_grade": grade_payload}.items() if not payload]},
             "reason_codes": ["EVENT_LEVEL_SIGNAL_IDENTITY_ACTIVE", "ONE_TELEGRAM_SIGNAL_PER_EVENT", "OPPOSITE_BUCKET_AUDIT_ACTIVE", "PAPER_ONLY", "NO_LIVE_EXECUTION", "NO_PRIVATE_API"],
+            "model_survival_registry": {"registry_status": survival_report.get("registry_status"), "blocked_count": len(blocked_trades)},
             "feeds_next": ["TELEGRAM_RESEARCH_REPORTER", "RESEARCH_PAPER_LIFECYCLE_ENGINE"],
             "execution_safety": {"safe_to_open_real_trade": False, "private_api_used": False, "live_order_sent": False},
         },

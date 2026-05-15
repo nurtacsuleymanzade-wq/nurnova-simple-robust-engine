@@ -19,6 +19,7 @@ EVIDENCE_PATH = STATE_DIR / "latest_flow_evidence.json"
 PERSISTENCE_PATH = STATE_DIR / "latest_flow_persistence.json"
 MARKET_TRUTH_PATH = STATE_DIR / "latest_market_truth.json"
 MODEL_REGISTRY_PATH = STATE_DIR / "latest_model_registry.json"
+TIMEFRAME_RESOLUTION_PATH = STATE_DIR / "latest_timeframe_resolution.json"
 
 DEPTH_MEMORY_PATH = STATE_DIR / "latest_depth_liquidity_memory.json"
 CONTEXT_SYNC_PATH = STATE_DIR / "latest_context_sync.json"
@@ -170,6 +171,36 @@ def _model_identity(model_registry: dict[str, Any] | None) -> tuple[str | None, 
     return None, "NO_MODEL"
 
 
+def _rr_fields(side: str, entry: float | None, stop_loss: float | None, tp1: float | None, tp2: float | None) -> dict[str, float | None]:
+    if entry is None or stop_loss is None:
+        return {"risk_distance": None, "tp1_distance": None, "tp2_distance": None, "rr1": None, "rr2": None}
+    if side == "LONG":
+        risk_distance = entry - stop_loss
+        tp1_distance = tp1 - entry if tp1 is not None else None
+        tp2_distance = tp2 - entry if tp2 is not None else None
+    elif side == "SHORT":
+        risk_distance = stop_loss - entry
+        tp1_distance = entry - tp1 if tp1 is not None else None
+        tp2_distance = entry - tp2 if tp2 is not None else None
+    else:
+        return {"risk_distance": None, "tp1_distance": None, "tp2_distance": None, "rr1": None, "rr2": None}
+    if risk_distance <= 0:
+        return {
+            "risk_distance": round(risk_distance, 6),
+            "tp1_distance": tp1_distance,
+            "tp2_distance": tp2_distance,
+            "rr1": None,
+            "rr2": None,
+        }
+    return {
+        "risk_distance": round(risk_distance, 6),
+        "tp1_distance": round(tp1_distance, 6) if tp1_distance is not None else None,
+        "tp2_distance": round(tp2_distance, 6) if tp2_distance is not None else None,
+        "rr1": round(tp1_distance / risk_distance, 4) if tp1_distance is not None and tp1_distance > 0 else None,
+        "rr2": round(tp2_distance / risk_distance, 4) if tp2_distance is not None and tp2_distance > 0 else None,
+    }
+
+
 def _build_identity(
     scenario_trigger: dict[str, Any],
     setup_context: dict[str, Any],
@@ -241,6 +272,7 @@ def compute_trade_plan(
     market_truth = market_truth or {}
     if model_registry is None:
         model_registry = _load_json(MODEL_REGISTRY_PATH)
+    timeframe_resolution = _load_json(TIMEFRAME_RESOLUTION_PATH) or {}
 
     symbol = (
         scenario_trigger.get("symbol")
@@ -491,6 +523,17 @@ def compute_trade_plan(
         "confidence": confidence,
         "plan_explanation": {k: v for k, v in plan_explanation.items() if v},
     }
+    rr_fields = _rr_fields(side, entry_price, stop_loss, tp1, tp2)
+    if rr_fields["rr1"] is None and rr_fields["rr2"] is None and plan_status not in ("NO_PLAN", "NO_ACTIONABLE_PLAN"):
+        reason_codes.append("RR_INVALID")
+
+    primary_tf = str(timeframe_resolution.get("primary_tf") or "1m")
+    trigger_tf = str(timeframe_resolution.get("trigger_tf") or primary_tf)
+    context_tf = str(timeframe_resolution.get("context_tf") or "15m")
+    structure_tf = str(timeframe_resolution.get("structure_tf") or primary_tf)
+    expected_hold_label = str(timeframe_resolution.get("expected_hold_label") or "2m–15m")
+    timeframe_reason = list(timeframe_resolution.get("timeframe_reason") or [f"{primary_tf} trade plan fallback"])
+    plan_style = str((timeframe_resolution.get("profile") or {}).get("plan_style") or "DEFAULT_INTRADAY")
 
     reason_codes += [
         f"SYMBOL_{symbol}",
@@ -528,6 +571,8 @@ def compute_trade_plan(
         "tp2": tp2,
         "rr_tp1": rr_tp1,
         "rr_tp2": rr_tp2,
+        "rr1": rr_fields["rr1"],
+        "rr2": rr_fields["rr2"],
         "invalidation_price": invalidation_price,
         "preview_plan": preview_plan,
         "plan_quality_score": quality_score,
@@ -538,9 +583,24 @@ def compute_trade_plan(
         "invalidation_reason": invalidation_reason,
         "model_veto": model_veto,
         "model_veto_reason": model_veto_reason,
-        "timeframe": "1m",
+        "timeframe": primary_tf,
+        "primary_tf": primary_tf,
+        "trigger_tf": trigger_tf,
+        "context_tf": context_tf,
+        "structure_tf": structure_tf,
+        "expected_hold_label": expected_hold_label,
+        "expected_hold_min_minutes": timeframe_resolution.get("expected_hold_min_minutes"),
+        "expected_hold_max_minutes": timeframe_resolution.get("expected_hold_max_minutes"),
+        "timeframe_confidence": timeframe_resolution.get("timeframe_confidence", 0.0),
+        "timeframe_reason": timeframe_reason,
+        "plan_style": plan_style,
         "candle_close_time": candle_close_time,
-        "risk_context": risk_context,
+        "risk_context": {
+            **risk_context,
+            "risk_distance": rr_fields["risk_distance"],
+            "tp1_distance": rr_fields["tp1_distance"],
+            "tp2_distance": rr_fields["tp2_distance"],
+        },
         "data_quality": {"level": dq_level, "score": dq_score},
         "reason_codes": reason_codes,
         "feeds_next": {"next_blocks": ["S18_DECISION_GATE"]},
@@ -579,6 +639,8 @@ def no_valid_output(reason: str) -> dict[str, Any]:
         "tp2": None,
         "rr_tp1": None,
         "rr_tp2": None,
+        "rr1": None,
+        "rr2": None,
         "invalidation_price": None,
         "preview_plan": None,
         "plan_quality_score": 0.0,
@@ -590,11 +652,22 @@ def no_valid_output(reason: str) -> dict[str, Any]:
         "model_veto": False,
         "model_veto_reason": None,
         "timeframe": "1m",
+        "primary_tf": "1m",
+        "trigger_tf": "1m",
+        "context_tf": "15m",
+        "structure_tf": "1m",
+        "expected_hold_label": "2m–15m",
+        "expected_hold_min_minutes": 2,
+        "expected_hold_max_minutes": 15,
+        "timeframe_confidence": 0.0,
+        "timeframe_reason": ["1m fallback trade plan"],
+        "plan_style": "DEFAULT_INTRADAY",
         "candle_close_time": "UNKNOWN",
         "risk_context": {
             "stop_distance": 0.0,
             "tp1_distance": 0.0,
             "tp2_distance": 0.0,
+            "risk_distance": None,
             "min_rr_tp1": MIN_RR_TP1,
             "min_rr_tp2": MIN_RR_TP2,
             "trigger_strength": 0.0,

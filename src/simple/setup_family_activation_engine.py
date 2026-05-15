@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.core.model_survival_registry import load_model_survival_registry, split_active_quarantined, update_model_survival_report
+
 BLOCK_ID = "SETUP_FAMILY_ACTIVATION_ENGINE"
 STATE_DIR = Path("state/simple")
 DATA_DIR = Path("data/simple")
@@ -940,10 +942,17 @@ def run_setup_family_activation_engine() -> dict[str, Any]:
     business_zone = _load_json(BUSINESS_ZONE_PATH) or {}
     liquidity_map = _load_json(LIQUIDITY_MAP_PATH) or {}
 
-    validated_models = [model for model in (semantic.get("validated_models") or []) if bool(model.get("paper_allowed", True))]
-    clusters = list(clusters_payload.get("clusters") or [])
-    allowed_clusters = list(cooldown.get("allowed_clusters") or [])
-    blocked_clusters = list(cooldown.get("blocked_clusters") or [])
+    registry = load_model_survival_registry()
+    validated_models_raw = [model for model in (semantic.get("validated_models") or []) if bool(model.get("paper_allowed", True))]
+    clusters_raw = list(clusters_payload.get("clusters") or [])
+    allowed_clusters_raw = list(cooldown.get("allowed_clusters") or [])
+    blocked_clusters_raw = list(cooldown.get("blocked_clusters") or [])
+    validated_models, blocked_models = split_active_quarantined(validated_models_raw, BLOCK_ID)
+    clusters, blocked_cluster_items = split_active_quarantined(clusters_raw, BLOCK_ID)
+    allowed_clusters, blocked_allowed_clusters = split_active_quarantined(allowed_clusters_raw, BLOCK_ID)
+    blocked_clusters, blocked_blocked_clusters = split_active_quarantined(blocked_clusters_raw, BLOCK_ID)
+    registry_blocked = [*blocked_models, *blocked_cluster_items, *blocked_allowed_clusters, *blocked_blocked_clusters]
+    survival_report = update_model_survival_report(location=BLOCK_ID, allowed_count=len(validated_models) + len(clusters) + len(allowed_clusters), blocked_items=registry_blocked, registry=registry)
     semantic_states = _semantic_states(validated_models, dominant_model, unified_context)
 
     assessments = [
@@ -1086,7 +1095,12 @@ def run_setup_family_activation_engine() -> dict[str, Any]:
             "NO_LIVE_EXECUTION",
             "NO_PRIVATE_API",
             "PAPER_ONLY",
+            *([] if not registry_blocked else ["MODEL_SURVIVAL_REGISTRY_BLOCK"]),
         ],
+        "model_survival_registry": {
+            "registry_status": survival_report.get("registry_status"),
+            "blocked_count": len(registry_blocked),
+        },
         "data_quality": {
             "level": "HIGH" if semantic and clusters_payload and cooldown else "MEDIUM" if semantic or clusters_payload else "LOW",
             "missing_inputs": [

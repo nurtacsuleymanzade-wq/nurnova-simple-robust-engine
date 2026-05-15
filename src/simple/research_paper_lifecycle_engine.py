@@ -25,7 +25,7 @@ STATE_DIR = Path("state/simple")
 OBSERVATION_PATH = STATE_DIR / "latest_observation_factory.json"
 DNA_PATH = STATE_DIR / "latest_mtf_candle_dna.json"
 MAX_HISTORY_ROWS = 5000
-MAX_OPEN_TRADES = 12
+MAX_OPEN_TRADES = 6
 
 
 def _current_price(observation: dict[str, Any], dna: dict[str, Any]) -> float | None:

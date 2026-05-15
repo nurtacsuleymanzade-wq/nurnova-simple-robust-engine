@@ -8,6 +8,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from src.core.model_survival_registry import load_model_survival_registry, split_active_quarantined, update_model_survival_report
 from src.simple.jsonl_tail_reader import safe_read_json
 from src.simple.model_timeframe_profile import get_timeframe_profile
 from src.simple.research_epoch import ACTIVE_EPOCH_ID, append_epoch_jsonl, epoch_data_path, epoch_state_path
@@ -46,6 +47,7 @@ MARKET_STRUCTURE_PATH = STATE_DIR / "latest_market_structure.json"
 INTERPRETATION_PATH = STATE_DIR / "latest_interpretation.json"
 MODEL_SURVIVAL_FILTER_PATH = epoch_state_path("latest_model_survival_filter.json")
 RESEARCH_EDGE_MATRIX_PATH = epoch_state_path("latest_research_edge_matrix.json")
+ZONE_CONTEXT_PATH = STATE_DIR / "latest_zone_context.json"
 
 MAX_OPEN_TOTAL = 6
 MAX_OPEN_PER_MODEL_ID = 1
@@ -786,12 +788,16 @@ def run_paper_trade_factory() -> dict[str, Any]:
     timeframe_resolution = load_json(TIMEFRAME_RESOLUTION_PATH) or {}
     model_survival = load_json(MODEL_SURVIVAL_FILTER_PATH) or {}
     edge_matrix = load_json(RESEARCH_EDGE_MATRIX_PATH) or {}
+    zone_context = load_json(ZONE_CONTEXT_PATH) or {}
+    registry = load_model_survival_registry()
     lifecycle, lifecycle_reason = safe_read_json(RESEARCH_LIFECYCLE_PATH, default={}, max_bytes=500_000)
     lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
 
     current_price = _current_price(observation, dna)
     atr_1m = safe_float(((atr.get("1m") or {}).get("atr_14")))
     selected_clusters, source_selection_mode, selection_reason_codes = _select_candidates(activation, semantic, clusters, cooldown)
+    selected_clusters, registry_blocked_clusters = split_active_quarantined(selected_clusters, BLOCK_ID)
+    survival_report = update_model_survival_report(location=BLOCK_ID, allowed_count=len(selected_clusters), blocked_items=registry_blocked_clusters, registry=registry)
 
     activation_band = str(activation.get("activation_band") or "WATCH_ONLY").upper()
     activation_ready = bool(activation.get("ready_for_paper_research")) and activation_band in ALLOWED_RESEARCH_BANDS
@@ -841,6 +847,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
         "blocked_by_new_trade_cap": 0,
         "blocked_by_hard_entry_gate": 0,
         "blocked_by_model_survival": 0,
+        "blocked_by_model_survival_registry": len(registry_blocked_clusters),
         "blocked_by_setup_family_negative_edge": 0,
         "blocked_by_opposite_event_bucket": 0,
         "allowed_research_band_counts": {},
@@ -878,6 +885,8 @@ def run_paper_trade_factory() -> dict[str, Any]:
         if trade.get("status") == "INVALID":
             trades.append(trade)
             continue
+        if zone_context:
+            trade["zone_context"] = zone_context.get("zones") or []
 
         model_id_key = _model_id_key(trade)
         family_direction_key = _family_direction_key(trade)
@@ -907,7 +916,11 @@ def run_paper_trade_factory() -> dict[str, Any]:
         gate_reason = _hard_entry_gate_reason(trade)
         survival_reason = _survival_gate_reason(trade, model_survival)
         setup_negative_reason = _setup_family_negative_edge_reason(trade, edge_matrix)
-        if gate_reason:
+        registry_allowed_trade, registry_blocked_trade = split_active_quarantined([trade], BLOCK_ID)
+        if registry_blocked_trade:
+            paper_safety["blocked_by_model_survival_registry"] += 1
+            guard_reason = "MODEL_SURVIVAL_REGISTRY_BLOCK"
+        elif gate_reason:
             paper_safety["blocked_by_hard_entry_gate"] += 1
             guard_reason = gate_reason
         elif survival_reason:
@@ -994,6 +1007,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
             "validated_models": len(semantic.get("validated_models") or []),
             "cluster_count": len(clusters.get("clusters") or []),
             "allowed_clusters": len(cooldown.get("allowed_clusters") or []),
+            "model_survival_registry_blocked_count": paper_safety["blocked_by_model_survival_registry"],
             "setup_family_activation_ready": activation_ready,
             "activation_band": activation_band,
                 "paper_trade_candidates": len([trade for trade in trades if str(trade.get("status") or "").upper() == "OPEN"]),
@@ -1028,7 +1042,12 @@ def run_paper_trade_factory() -> dict[str, Any]:
                 "latest_model_survival_filter": model_survival,
                 "latest_research_edge_matrix": edge_matrix,
                 "latest_research_paper_lifecycle": lifecycle,
+                "latest_zone_context": zone_context,
             }.items() if not payload],
+        },
+        "model_survival_registry": {
+            "registry_status": survival_report.get("registry_status"),
+            "blocked_count": paper_safety["blocked_by_model_survival_registry"],
         },
         "current_open_summary": {
             "existing_open_trades": len(open_trades),

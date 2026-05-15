@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.core.model_survival_registry import load_model_survival_registry, split_active_quarantined, update_model_survival_report
 from src.simple.jsonl_tail_reader import read_jsonl_tail_objects
 from src.simple.research_epoch import ACTIVE_EPOCH_ID, append_epoch_jsonl, epoch_data_path, epoch_state_path
 from src.simple.research_runtime import current_runtime_context, load_json, safe_float, stamp_payload, write_json
@@ -86,11 +87,14 @@ def _group_metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
 def run_research_edge_matrix_engine() -> dict[str, Any]:
     context = current_runtime_context()
     accounting = load_json(ACCOUNTING_PATH) or {}
+    registry = load_model_survival_registry()
     all_closed = _closed_records()
     grouped: dict[tuple[str, ...], list[dict[str, Any]]] = {}
     invalid_sample_count = 0
 
-    for trade in all_closed.values():
+    closed_values, blocked_closed = split_active_quarantined(list(all_closed.values()), BLOCK_ID)
+    survival_report = update_model_survival_report(location=BLOCK_ID, allowed_count=len(closed_values), blocked_items=blocked_closed, registry=registry)
+    for trade in closed_values:
         if not _clean_sample(trade):
             invalid_sample_count += 1
             continue
@@ -138,7 +142,9 @@ def run_research_edge_matrix_engine() -> dict[str, Any]:
                 "best_expectancy": best_group.get("expectancy"),
                 "best_winrate": best_group.get("winrate"),
                 "invalid_sample_count": invalid_sample_count,
+                "model_survival_blocked_count": len(blocked_closed),
             },
+            "model_survival_registry": {"registry_status": survival_report.get("registry_status"), "blocked_count": len(blocked_closed)},
             "best_winrate_model": best_winrate_model,
             "best_avg_r_model": best_avg_r_model,
             "best_a_plus_model": best_a_plus_model,

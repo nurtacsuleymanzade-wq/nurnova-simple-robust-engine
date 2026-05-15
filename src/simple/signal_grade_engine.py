@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from src.core.model_survival_registry import load_model_survival_registry, split_active_quarantined, update_model_survival_report
 from src.simple.research_epoch import ACTIVE_EPOCH_ID, append_epoch_jsonl, epoch_data_path, epoch_state_path
 from src.simple.research_runtime import current_runtime_context, load_json, safe_float, source_state_refs_from_paths, stamp_payload, write_json
 
@@ -62,6 +63,10 @@ def grade_signal_record(
 
     blockers: list[str] = []
     reasons: list[str] = []
+    registry = load_model_survival_registry()
+    model_id = trade.get("model_id") or trade.get("dominant_model_id") or trade.get("primary_model")
+    if model_id and str(model_id) in {str(item) for item in registry.get("quarantined_models") or []}:
+        blockers.append("MODEL_SURVIVAL_REGISTRY_BLOCK")
     if not _direction_valid(direction):
         blockers.append("DIRECTION_INVALID")
     if not primary_tf or not context_tf:
@@ -155,7 +160,10 @@ def run_signal_grade_engine() -> dict[str, Any]:
     factory = load_json(PAPER_FACTORY_PATH) or {}
     edge = load_json(EDGE_PATH) or {}
     accounting = load_json(ACCOUNTING_PATH) or {}
-    trades = list(factory.get("newest_opened_this_loop") or factory.get("top_candidate_diagnostics") or [])
+    registry = load_model_survival_registry()
+    raw_trades = list(factory.get("newest_opened_this_loop") or factory.get("top_candidate_diagnostics") or [])
+    trades, blocked_trades = split_active_quarantined(raw_trades, BLOCK_ID)
+    survival_report = update_model_survival_report(location=BLOCK_ID, allowed_count=len(trades), blocked_items=blocked_trades, registry=registry)
     graded = []
     for trade in trades:
         record = dict(trade)
@@ -170,12 +178,14 @@ def run_signal_grade_engine() -> dict[str, Any]:
             "graded_signals": graded[:50],
             "summary": {
                 "graded_signal_count": len(graded),
+                "model_survival_blocked_count": len(blocked_trades),
                 "a_plus_count": sum(1 for item in graded if item.get("signal_grade") == "A_PLUS"),
                 "best_grade": primary.get("signal_grade"),
                 "best_grade_score": primary.get("grade_score"),
             },
             "data_quality": {"level": "HIGH" if factory else "MEDIUM", "missing_inputs": [name for name, payload in {"paper_trade_factory": factory, "setup_activation": setup, "timeframe_resolution": timeframe}.items() if not payload]},
             "reason_codes": ["SIGNAL_GRADE_CONSTITUTION_ACTIVE", "PAPER_ONLY", "NO_LIVE_EXECUTION", "NO_PRIVATE_API"],
+            "model_survival_registry": {"registry_status": survival_report.get("registry_status"), "blocked_count": len(blocked_trades)},
             "feeds_next": ["SIGNAL_EVENT_CONSOLIDATOR", "TELEGRAM_RESEARCH_REPORTER"],
             "execution_safety": {"safe_to_open_real_trade": False, "private_api_used": False, "live_order_sent": False},
         },

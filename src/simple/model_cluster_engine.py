@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.core.model_survival_registry import load_model_survival_registry, split_active_quarantined, update_model_survival_report
+
 BLOCK_ID = "MODEL_CLUSTER_ENGINE"
 STATE_DIR = Path("state/simple")
 DATA_DIR = Path("data/simple")
@@ -122,7 +124,10 @@ def run_model_cluster_engine() -> dict[str, Any]:
     validation = _load_json(VALIDATION_PATH) or {}
     observation = _load_json(OBSERVATION_PATH) or {}
     dna = _load_json(DNA_PATH) or {}
-    models = list(validation.get("validated_models") or [])
+    registry = load_model_survival_registry()
+    raw_models = list(validation.get("validated_models") or [])
+    models, blocked_models = split_active_quarantined(raw_models, BLOCK_ID)
+    survival_report = update_model_survival_report(location=BLOCK_ID, allowed_count=len(models), blocked_items=blocked_models, registry=registry)
     symbol = str(observation.get("symbol") or validation.get("symbol") or "BTCUSDT")
     current_entry = _entry_price(observation, dna)
     entry_zone_bucket = _entry_bucket(current_entry)
@@ -182,13 +187,20 @@ def run_model_cluster_engine() -> dict[str, Any]:
         "clusters": clusters,
         "summary": {
             "validated_models": len(models),
+            "raw_validated_models": len(raw_models),
             "cluster_count": len(clusters),
             "suppressed_duplicate_count": suppressed_duplicate_count,
+            "model_survival_blocked_count": len(blocked_models),
+        },
+        "model_survival_registry": {
+            "registry_status": survival_report.get("registry_status"),
+            "blocked_count": len(blocked_models),
         },
         "reason_codes": [
             f"VALIDATED_MODELS_{len(models)}",
             f"CLUSTERS_{len(clusters)}",
             f"SUPPRESSED_DUPLICATES_{suppressed_duplicate_count}",
+            *([] if not blocked_models else ["MODEL_SURVIVAL_REGISTRY_BLOCK"]),
         ],
         "data_quality": {
             "level": "HIGH" if validation else "LOW",

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.core.model_survival_registry import load_model_survival_registry, split_active_quarantined, update_model_survival_report
 from src.simple.model_condition_library import evaluate_condition, run_condition_semantic_selftest
 
 BLOCK_ID = "MODEL_HUNTER_ENGINE"
@@ -143,6 +144,7 @@ def _matched_list(results: dict[str, dict[str, Any]], status: str) -> list[str]:
 def run_model_hunter_engine() -> dict[str, Any]:
     definitions_payload = _load_json(MODEL_DEFINITIONS_PATH) or {}
     models = list(definitions_payload.get("models") or [])
+    registry = load_model_survival_registry()
     state = _build_state_bundle()
     symbol = str((state.get("observation") or {}).get("symbol") or "BTCUSDT")
     missing_inputs = [name for name, payload in state.items() if not payload]
@@ -223,6 +225,14 @@ def run_model_hunter_engine() -> dict[str, Any]:
         if final_score >= 0.30 and str(model.get("direction")) in ("LONG", "SHORT") and bool(model.get("opens_paper_trade")):
             detected_models.append(instance)
 
+    detected_models, blocked_detected = split_active_quarantined(detected_models, BLOCK_ID)
+    no_trade_models, blocked_no_trade = split_active_quarantined(no_trade_models, BLOCK_ID)
+    survival_report = update_model_survival_report(
+        location=BLOCK_ID,
+        allowed_count=len(detected_models) + len(no_trade_models),
+        blocked_items=[*blocked_detected, *blocked_no_trade],
+        registry=registry,
+    )
     top_model = max(detected_models, key=lambda item: item.get("match_score", 0.0), default=None)
     output = {
         "timestamp_utc": _utc_now(),
@@ -242,6 +252,11 @@ def run_model_hunter_engine() -> dict[str, Any]:
             "top_model_score": top_model.get("match_score") if top_model else None,
             "semantic_health": semantic_health,
             "semantic_failed_tests": list(semantic_selftest.get("failed_tests") or []),
+            "model_survival_blocked_count": len(blocked_detected) + len(blocked_no_trade),
+        },
+        "model_survival_registry": {
+            "registry_status": survival_report.get("registry_status"),
+            "blocked_count": len(blocked_detected) + len(blocked_no_trade),
         },
         "semantic_health": semantic_health,
         "semantic_selftest": semantic_selftest,
