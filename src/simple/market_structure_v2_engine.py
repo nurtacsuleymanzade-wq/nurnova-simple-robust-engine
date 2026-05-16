@@ -15,6 +15,7 @@ LATEST_MARKET_TRUTH_PATH = STATE_DIR / "latest_market_truth.json"
 LATEST_HYBRID_DNA_PATH = STATE_DIR / "latest_hybrid_candle_dna.json"
 LATEST_1S_EVIDENCE_PATH = STATE_DIR / "latest_1s_evidence.json"
 ONE_SECOND_EVIDENCE_JSONL_PATH = Path("data/simple/one_second_evidence.jsonl")
+HYBRID_DNA_JSONL_PATH = Path("data/simple/hybrid_candle_dna.jsonl")
 
 FEEDS_NEXT = [
     "REGIME_CLASSIFIER",
@@ -155,11 +156,56 @@ def _load_1s_evidence_jsonl_tail(path: Path, max_lines: int = 600) -> list[dict[
     return out
 
 
+def _load_hybrid_dna_jsonl_candles(path: Path, max_lines: int = 200) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    candles: list[dict[str, Any]] = []
+    for line in lines[-max_lines:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            raw = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(raw, dict):
+            continue
+        official = raw.get("official_candle")
+        if not isinstance(official, dict):
+            continue
+        open_v = _safe_float(official.get("open"))
+        high_v = _safe_float(official.get("high"))
+        low_v = _safe_float(official.get("low"))
+        close_v = _safe_float(official.get("close"))
+        if open_v is None or high_v is None or low_v is None or close_v is None:
+            continue
+        candle = {
+            "open": open_v,
+            "high": max(high_v, open_v, close_v),
+            "low": min(low_v, open_v, close_v),
+            "close": close_v,
+            "timestamp_utc": raw.get("timestamp_utc"),
+        }
+        ts = _extract_ts_seconds(raw)
+        if ts is not None:
+            candle["ts"] = ts
+        candles.append(candle)
+    return candles
+
+
 def _extract_candles() -> tuple[list[dict[str, Any]], list[str]]:
     reason_codes: list[str] = []
     tried_sources: list[str] = []
 
-    # Priority A: data/simple/one_second_evidence.jsonl
+    # Priority A: data/simple/hybrid_candle_dna.jsonl
+    tried_sources.append("HYBRID_DNA_JSONL")
+    hybrid_jsonl_candles = _load_hybrid_dna_jsonl_candles(HYBRID_DNA_JSONL_PATH, max_lines=200)
+    if len(hybrid_jsonl_candles) >= 5:
+        reason_codes.append("CANDLES_FROM_HYBRID_DNA_JSONL")
+        return hybrid_jsonl_candles, reason_codes
+
+    # Priority B: data/simple/one_second_evidence.jsonl
     tried_sources.append("ONE_SECOND_EVIDENCE_JSONL")
     evidence_rows = _load_1s_evidence_jsonl_tail(ONE_SECOND_EVIDENCE_JSONL_PATH, max_lines=600)
     if evidence_rows:
@@ -168,7 +214,7 @@ def _extract_candles() -> tuple[list[dict[str, Any]], list[str]]:
             reason_codes.append("CANDLES_FROM_1S_EVIDENCE")
             return candles, reason_codes
 
-    # Priority B: state/simple/latest_1s_evidence.json
+    # Priority C: state/simple/latest_1s_evidence.json
     tried_sources.append("LATEST_1S_EVIDENCE")
     evidence_state = _load_json(LATEST_1S_EVIDENCE_PATH)
     if evidence_state:
@@ -184,7 +230,7 @@ def _extract_candles() -> tuple[list[dict[str, Any]], list[str]]:
                 reason_codes.append("CANDLES_FROM_LATEST_1S_EVIDENCE")
                 return candles, reason_codes
 
-    # Priority C: state/simple/latest_hybrid_candle_dna.json
+    # Priority D: state/simple/latest_hybrid_candle_dna.json
     tried_sources.append("LATEST_HYBRID_CANDLE_DNA")
     hybrid = _load_json(LATEST_HYBRID_DNA_PATH)
     if hybrid:
@@ -205,7 +251,7 @@ def _extract_candles() -> tuple[list[dict[str, Any]], list[str]]:
             reason_codes.append("CANDLES_FROM_HYBRID_DNA")
             return candles, reason_codes
 
-    # Priority D: state/simple/latest_market_truth.json
+    # Priority E: state/simple/latest_market_truth.json
     tried_sources.append("LATEST_MARKET_TRUTH")
     market_truth = _load_json(LATEST_MARKET_TRUTH_PATH)
     if market_truth:

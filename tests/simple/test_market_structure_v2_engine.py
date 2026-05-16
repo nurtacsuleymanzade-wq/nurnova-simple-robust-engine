@@ -50,6 +50,7 @@ def test_not_ready_when_data_missing(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(m, "LATEST_HYBRID_DNA_PATH", tmp_path / "missing_hybrid.json")
     monkeypatch.setattr(m, "LATEST_1S_EVIDENCE_PATH", tmp_path / "missing_1s_evidence.json")
     monkeypatch.setattr(m, "ONE_SECOND_EVIDENCE_JSONL_PATH", tmp_path / "missing_one_second_evidence.jsonl")
+    monkeypatch.setattr(m, "HYBRID_DNA_JSONL_PATH", tmp_path / "missing_hybrid_dna.jsonl")
     result = m.run_market_structure_v2_engine(symbol="BTCUSDT", fake_sample=False)
     assert result["structure_status"] == "NOT_READY"
     assert result["structure_bias"] == "NEUTRAL"
@@ -90,6 +91,7 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
 def test_1s_evidence_jsonl_can_make_ready_and_swings(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(m, "OUTPUT_PATH", tmp_path / "latest_market_structure_v2.json")
     monkeypatch.setattr(m, "ONE_SECOND_EVIDENCE_JSONL_PATH", tmp_path / "one_second_evidence.jsonl")
+    monkeypatch.setattr(m, "HYBRID_DNA_JSONL_PATH", tmp_path / "missing_hybrid_dna.jsonl")
     monkeypatch.setattr(m, "LATEST_1S_EVIDENCE_PATH", tmp_path / "latest_1s_evidence.json")
     monkeypatch.setattr(m, "LATEST_HYBRID_DNA_PATH", tmp_path / "latest_hybrid_candle_dna.json")
     monkeypatch.setattr(m, "LATEST_MARKET_TRUTH_PATH", tmp_path / "latest_market_truth.json")
@@ -113,6 +115,7 @@ def test_1s_evidence_jsonl_can_make_ready_and_swings(tmp_path: Path, monkeypatch
 def test_malformed_jsonl_line_does_not_crash(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(m, "OUTPUT_PATH", tmp_path / "latest_market_structure_v2.json")
     monkeypatch.setattr(m, "ONE_SECOND_EVIDENCE_JSONL_PATH", tmp_path / "one_second_evidence.jsonl")
+    monkeypatch.setattr(m, "HYBRID_DNA_JSONL_PATH", tmp_path / "missing_hybrid_dna.jsonl")
     monkeypatch.setattr(m, "LATEST_1S_EVIDENCE_PATH", tmp_path / "latest_1s_evidence.json")
     monkeypatch.setattr(m, "LATEST_HYBRID_DNA_PATH", tmp_path / "latest_hybrid_candle_dna.json")
     monkeypatch.setattr(m, "LATEST_MARKET_TRUTH_PATH", tmp_path / "latest_market_truth.json")
@@ -131,3 +134,36 @@ def test_malformed_jsonl_line_does_not_crash(tmp_path: Path, monkeypatch) -> Non
         "CANDLES_FROM_1S_EVIDENCE" in result["reason_codes"]
         or "INSUFFICIENT_CANDLES_FOR_STRUCTURE" in result["reason_codes"]
     )
+
+
+def test_hybrid_dna_jsonl_is_highest_priority_source(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(m, "OUTPUT_PATH", tmp_path / "latest_market_structure_v2.json")
+    monkeypatch.setattr(m, "HYBRID_DNA_JSONL_PATH", tmp_path / "hybrid_candle_dna.jsonl")
+    monkeypatch.setattr(m, "ONE_SECOND_EVIDENCE_JSONL_PATH", tmp_path / "one_second_evidence.jsonl")
+    monkeypatch.setattr(m, "LATEST_1S_EVIDENCE_PATH", tmp_path / "latest_1s_evidence.json")
+    monkeypatch.setattr(m, "LATEST_HYBRID_DNA_PATH", tmp_path / "latest_hybrid_candle_dna.json")
+    monkeypatch.setattr(m, "LATEST_MARKET_TRUTH_PATH", tmp_path / "latest_market_truth.json")
+
+    rows: list[dict] = []
+    base = 1778856000
+    pattern = [0, 5, 10, 5, 0, -5, -10, -5, 0, 6]
+    for idx, p in enumerate(pattern):
+        px = 78190 + p
+        rows.append(
+            {
+                "timestamp_utc": f"2026-05-16T00:{idx:02d}:00Z",
+                "official_candle": {"open": px - 1, "high": px + 2, "low": px - 2, "close": px},
+            }
+        )
+    _write_jsonl(tmp_path / "hybrid_candle_dna.jsonl", rows)
+
+    # Put competing source too; hybrid jsonl should still win.
+    _write_jsonl(
+        tmp_path / "one_second_evidence.jsonl",
+        [{"second_epoch": base + i, "open": 79000, "high": 79001, "low": 78999, "close": 79000} for i in range(60)],
+    )
+
+    result = m.run_market_structure_v2_engine(symbol="BTCUSDT", fake_sample=False)
+    assert m.OUTPUT_PATH.exists()
+    assert "CANDLES_FROM_HYBRID_DNA_JSONL" in result["reason_codes"]
+    assert result["block_id"] == "MARKET_STRUCTURE_V2"
