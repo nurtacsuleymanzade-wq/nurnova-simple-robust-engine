@@ -34,6 +34,7 @@ _ACTIVE_CHAIN_STAGES: list[tuple[str, str, str]] = [
     ("src.simple.atr_engine", "NOARG", "ATR_ENGINE"),
     ("src.simple.market_structure_engine", "NOARG", "MARKET_STRUCTURE_ENGINE"),
     ("src.simple.liquidity_map_engine", "NOARG", "LIQUIDITY_MAP_ENGINE"),
+    ("src.simple.market_structure_v2_engine", "NOARG", "MARKET_STRUCTURE_V2"),
     ("src.simple.interpretation_engine", "NOARG", "INTERPRETATION_ENGINE"),
     ("src.simple.three_scenario_engine", "NOARG", "THREE_SCENARIO_ENGINE"),
     ("src.simple.business_zone_engine", "NOARG", "BUSINESS_ZONE_ENGINE"),
@@ -109,8 +110,9 @@ def _check_critical(output: dict[str, Any]) -> str | None:
 
 
 def _classify_status(output: dict[str, Any]) -> str:
-    level = output.get("data_quality", {}).get("level", "")
-    if level in ("LOW", "CRITICAL", "INVALID"):
+    dq = output.get("data_quality", {})
+    level = dq.get("level", "") if isinstance(dq, dict) else str(dq).upper()
+    if level in ("LOW", "CRITICAL", "INVALID", "DEGRADED"):
         return "DEGRADED"
     return "PASSED"
 
