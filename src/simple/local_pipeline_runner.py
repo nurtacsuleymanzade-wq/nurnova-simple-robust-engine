@@ -67,6 +67,7 @@ _ACTIVE_CHAIN_STAGES: list[tuple[str, str, str]] = [
     ("src.simple.research_paper_lifecycle_engine", "NOARG", "RESEARCH_PAPER_LIFECYCLE_ENGINE"),
     ("src.simple.outcome_accounting_engine", "NOARG", "OUTCOME_ACCOUNTING_ENGINE"),
     ("src.simple.true_outcome_engine", "NOARG", "TRUE_OUTCOME_ENGINE"),
+    ("src.simple.run_contract_edge_matrix", "NOARG", "CONTRACT_EDGE_MATRIX"),
     ("src.simple.research_edge_matrix_engine", "NOARG", "RESEARCH_EDGE_MATRIX_ENGINE"),
     ("src.edge.tp_condition_dna_engine", "NOARG", "TP_CONDITION_DNA_ENGINE"),
     ("src.edge.edge_query_engine", "NOARG", "EDGE_QUERY_ENGINE"),
