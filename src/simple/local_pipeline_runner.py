@@ -36,6 +36,7 @@ _ACTIVE_CHAIN_STAGES: list[tuple[str, str, str]] = [
     ("src.simple.liquidity_map_engine", "NOARG", "LIQUIDITY_MAP_ENGINE"),
     ("src.simple.market_structure_v2_engine", "NOARG", "MARKET_STRUCTURE_V2"),
     ("src.simple.run_regime_classifier", "NOARG", "REGIME_CLASSIFIER"),
+    ("src.simple.run_setup_contract_engine", "NOARG", "SETUP_CONTRACT_ENGINE"),
     ("src.simple.interpretation_engine", "NOARG", "INTERPRETATION_ENGINE"),
     ("src.simple.three_scenario_engine", "NOARG", "THREE_SCENARIO_ENGINE"),
     ("src.simple.business_zone_engine", "NOARG", "BUSINESS_ZONE_ENGINE"),
