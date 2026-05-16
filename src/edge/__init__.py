@@ -1,1 +1,1 @@
-"""Edge-confirmation research engines."""
+from .edge import EdgeMatrix
