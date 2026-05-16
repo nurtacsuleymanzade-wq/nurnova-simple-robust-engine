@@ -276,17 +276,16 @@ def run_pipeline(symbol: str, source_mode: str = "LIVE") -> dict[str, Any]:
             output, runtime_ms, exc_str = _run_stage(module_path, func_name, symbol)
 
         if exc_str is not None:
+            print(f"[PIPELINE][ERROR] {fallback_label}: {exc_str}")
             block_results.append({
                 "block_id": fallback_label,
-                "status": "CRITICAL",
+                "status": "STAGE_FAILED",
                 "runtime_ms": runtime_ms,
                 "error": exc_str[:200],
             })
             blocks_failed += 1
-            if any(fallback_label.startswith(cb) for cb in {"S1_", "S2_", "S3_", "S4_", "S5_", "S6_"}):
-                pipeline_status = "STOPPED_CRITICAL"
-                stop_reason = f"EXCEPTION_IN_{fallback_label}"
-                break
+            pipeline_status = "COMPLETE_WITH_STAGE_FAILURES"
+            stop_reason = stop_reason or f"EXCEPTION_IN_{fallback_label}"
             continue
 
         if output is None:

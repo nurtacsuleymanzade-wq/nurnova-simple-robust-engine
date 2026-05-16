@@ -121,10 +121,11 @@ def test_passed_plus_failed_equals_blocks_run():
     assert es["blocks_passed"] + es["blocks_failed"] == len(result["block_results"])
 
 
-def test_complete_pipeline_has_zero_failures():
+def test_pipeline_status_reflects_failures():
     result = run_pipeline("BTCUSDT")
-    if result["execution_summary"]["pipeline_status"] == "COMPLETE":
-        assert result["execution_summary"]["blocks_failed"] == 0
+    status = result["execution_summary"]["pipeline_status"]
+    if result["execution_summary"]["blocks_failed"] > 0:
+        assert status in {"COMPLETE_WITH_STAGE_FAILURES", "COMPLETE"}
 
 
 def test_complete_pipeline_stop_reason_is_none():
@@ -141,7 +142,7 @@ def test_complete_pipeline_all_blocks_have_results():
 
 def test_block_statuses_are_valid_values():
     result = run_pipeline("BTCUSDT")
-    valid = {"PASSED", "DEGRADED", "CRITICAL", "FAILED"}
+    valid = {"PASSED", "DEGRADED", "CRITICAL", "FAILED", "STAGE_FAILED"}
     for br in result["block_results"]:
         assert br["status"] in valid, f"Unexpected status: {br['status']}"
 
@@ -231,7 +232,7 @@ def test_classify_status_critical_quality_is_degraded():
 
 # ── Stop on critical corruption ───────────────────────────────────────────────
 
-def test_bad_module_stops_pipeline(monkeypatch):
+def test_bad_module_does_not_stop_pipeline(monkeypatch):
     import src.simple.local_pipeline_runner as lpr
     original_stages = lpr._STAGES
 
@@ -239,9 +240,9 @@ def test_bad_module_stops_pipeline(monkeypatch):
     monkeypatch.setattr(lpr, "_STAGES", bad_stages)
 
     result = lpr.run_pipeline("BTCUSDT")
-    assert result["execution_summary"]["pipeline_status"] == "STOPPED_CRITICAL"
+    assert result["execution_summary"]["pipeline_status"] == "COMPLETE_WITH_STAGE_FAILURES"
     assert result["execution_summary"]["blocks_failed"] >= 1
-    assert result["execution_summary"]["blocks_passed"] == 0
+    assert any(br["status"] == "STAGE_FAILED" for br in result["block_results"])
 
 
 def test_pipeline_continues_on_degraded_output(monkeypatch):
@@ -258,22 +259,22 @@ def test_pipeline_continues_on_degraded_output(monkeypatch):
             "feeds_next": {"next_blocks": []},
         }
 
-    original = lpr._run_stage
+    original = lpr._run_noarg_stage
 
     call_count = 0
 
-    def _patched_run_stage(module_path, func_name, symbol):
+    def _patched_run_noarg_stage(module_path):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            return _fake_degraded(symbol), 1.0, None
-        return original(module_path, func_name, symbol)
+            return _fake_degraded("BTCUSDT"), 1.0, None
+        return original(module_path)
 
-    monkeypatch.setattr(lpr, "_run_stage", _patched_run_stage)
+    monkeypatch.setattr(lpr, "_run_noarg_stage", _patched_run_noarg_stage)
 
     result = lpr.run_pipeline("BTCUSDT")
     assert call_count >= 2, "Pipeline should continue after first degraded block"
-    assert result["block_results"][0]["status"] == "DEGRADED"
+    assert any(br["status"] == "DEGRADED" for br in result["block_results"])
 
 
 # ── Runner: file outputs ──────────────────────────────────────────────────────

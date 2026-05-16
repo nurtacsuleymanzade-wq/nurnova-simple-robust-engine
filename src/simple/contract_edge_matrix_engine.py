@@ -329,6 +329,8 @@ def run_contract_edge_matrix_engine(symbol: str = "BTCUSDT", fake_sample: bool =
     ]
     if legacy_rows:
         reason_codes.append("LEGACY_SAMPLE_NO_CONTRACT_ID")
+    if not rows:
+        reason_codes.append("NO_CLOSED_SAMPLES")
 
     next_action = "KEEP_SAMPLING"
     if tradeable_candidates:

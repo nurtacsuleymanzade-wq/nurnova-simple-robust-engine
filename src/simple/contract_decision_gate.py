@@ -76,7 +76,7 @@ def build_contract_decision_gate(
             "source": {"source_mode": "STATE_FILE"},
             "mode": MODE,
             "data_quality": "DEGRADED",
-            "decision_status": "WAIT",
+            "decision_status": "BLOCK",
             "direction": "NEUTRAL",
             "contract_id": None,
             "setup_family": None,
@@ -102,7 +102,7 @@ def build_contract_decision_gate(
             "allow_reasons": [],
             "downgrade_reasons": ["TRADE_PLAN_MISSING"],
             "confidence": 0.0,
-            "reason_codes": ["TRADE_PLAN_MISSING_WAIT"],
+            "reason_codes": ["TRADE_PLAN_MISSING", "DECISION_BLOCK"],
             "feeds_next": FEEDS_NEXT,
         }
 

@@ -115,3 +115,10 @@ def test_output_required_fields_present(tmp_path: Path, monkeypatch) -> None:
         assert k in out
         assert k in disk
 
+
+
+def test_missing_trade_plan_returns_block_not_wait(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(g, "CONTRACT_TRADE_PLAN_PATH", tmp_path / "missing_trade_plan.json")
+    out = g.build_contract_decision_gate(trade_plan_payload=None)
+    assert out["decision_status"] == "BLOCK"
+    assert "TRADE_PLAN_MISSING" in out["reason_codes"]

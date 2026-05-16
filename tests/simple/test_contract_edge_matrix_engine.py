@@ -44,6 +44,7 @@ def test_empty_history_no_crash(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(m, "REPORT_PATH", tmp_path / "contract_edge_matrix_latest_report.md")
     out = m.run_contract_edge_matrix_engine(symbol="BTCUSDT", fake_sample=False)
     assert out["sample_summary"]["closed_count"] == 0
+    assert "NO_CLOSED_SAMPLES" in out["reason_codes"]
 
 
 def test_fake_closed_trades_compute_metrics_and_grouping(tmp_path: Path, monkeypatch) -> None:
