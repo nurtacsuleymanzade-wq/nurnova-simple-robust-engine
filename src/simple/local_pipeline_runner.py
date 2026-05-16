@@ -59,6 +59,7 @@ _ACTIVE_CHAIN_STAGES: list[tuple[str, str, str]] = [
     ("src.edge.elite_context_detector", "NOARG", "ELITE_CONTEXT_DETECTOR"),
     ("src.simple.timeframe_resolver", "NOARG", "TIMEFRAME_RESOLVER"),
     ("src.simple.signal_data_contract", "NOARG", "SIGNAL_DATA_CONTRACT"),
+    ("src.simple.run_contract_driven_trade_plan", "NOARG", "CONTRACT_DRIVEN_TRADE_PLAN"),
     ("src.simple.paper_trade_factory", "NOARG", "PAPER_TRADE_FACTORY"),
     ("src.simple.signal_grade_engine", "NOARG", "SIGNAL_GRADE_ENGINE"),
     ("src.simple.signal_event_consolidator", "NOARG", "SIGNAL_EVENT_CONSOLIDATOR"),
