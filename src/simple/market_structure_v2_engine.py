@@ -13,6 +13,8 @@ OUTPUT_PATH = STATE_DIR / "latest_market_structure_v2.json"
 
 LATEST_MARKET_TRUTH_PATH = STATE_DIR / "latest_market_truth.json"
 LATEST_HYBRID_DNA_PATH = STATE_DIR / "latest_hybrid_candle_dna.json"
+LATEST_1S_EVIDENCE_PATH = STATE_DIR / "latest_1s_evidence.json"
+ONE_SECOND_EVIDENCE_JSONL_PATH = Path("data/simple/one_second_evidence.jsonl")
 
 FEEDS_NEXT = [
     "REGIME_CLASSIFIER",
@@ -40,6 +42,197 @@ def _load_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _safe_float(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    if out <= 0:
+        return None
+    return out
+
+
+def _extract_ts_seconds(row: dict[str, Any]) -> float | None:
+    for key in ("second_epoch", "ts", "timestamp", "event_time"):
+        raw = row.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, (int, float)):
+            ts = float(raw)
+            if ts > 1e12:
+                ts /= 1000.0
+            return ts
+    iso = row.get("timestamp_utc")
+    if isinstance(iso, str):
+        try:
+            return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return None
+    return None
+
+
+def _extract_ohlc_from_row(row: dict[str, Any], prev_close: float | None = None) -> tuple[float, float, float, float] | None:
+    open_v = _safe_float(row.get("open")) or _safe_float(row.get("o")) or _safe_float(row.get("price_open"))
+    high_v = _safe_float(row.get("high")) or _safe_float(row.get("h")) or _safe_float(row.get("price_high"))
+    low_v = _safe_float(row.get("low")) or _safe_float(row.get("l")) or _safe_float(row.get("price_low"))
+    close_v = (
+        _safe_float(row.get("close"))
+        or _safe_float(row.get("c"))
+        or _safe_float(row.get("price_close"))
+        or _safe_float(row.get("latest_price"))
+        or _safe_float(row.get("price"))
+    )
+    fallback_price = close_v or _safe_float(row.get("price")) or prev_close
+    if open_v is None:
+        open_v = fallback_price
+    if high_v is None:
+        high_v = fallback_price
+    if low_v is None:
+        low_v = fallback_price
+    if close_v is None:
+        close_v = fallback_price
+    if open_v is None or high_v is None or low_v is None or close_v is None:
+        return None
+    high_v = max(high_v, open_v, close_v)
+    low_v = min(low_v, open_v, close_v)
+    return open_v, high_v, low_v, close_v
+
+
+def _normalize_candle_like(row: dict[str, Any], prev_close: float | None = None) -> dict[str, Any] | None:
+    ohlc = _extract_ohlc_from_row(row, prev_close=prev_close)
+    if ohlc is None:
+        return None
+    open_v, high_v, low_v, close_v = ohlc
+    ts = _extract_ts_seconds(row)
+    return {"open": open_v, "high": high_v, "low": low_v, "close": close_v, "ts": ts}
+
+
+def _aggregate_seconds_to_1m(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    minute_buckets: dict[int, dict[str, Any]] = {}
+    prev_close: float | None = None
+    for row in rows:
+        ts = _extract_ts_seconds(row)
+        if ts is None:
+            continue
+        normalized = _normalize_candle_like(row, prev_close=prev_close)
+        if normalized is None:
+            continue
+        prev_close = float(normalized["close"])
+        minute_key = int(ts // 60)
+        if minute_key not in minute_buckets:
+            minute_buckets[minute_key] = {
+                "open": float(normalized["open"]),
+                "high": float(normalized["high"]),
+                "low": float(normalized["low"]),
+                "close": float(normalized["close"]),
+                "ts": minute_key * 60,
+            }
+            continue
+        bucket = minute_buckets[minute_key]
+        bucket["high"] = max(float(bucket["high"]), float(normalized["high"]))
+        bucket["low"] = min(float(bucket["low"]), float(normalized["low"]))
+        bucket["close"] = float(normalized["close"])
+    return [minute_buckets[k] for k in sorted(minute_buckets.keys())]
+
+
+def _load_1s_evidence_jsonl_tail(path: Path, max_lines: int = 600) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    out: list[dict[str, Any]] = []
+    for line in lines[-max_lines:]:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("json"):
+            line = line[4:].strip()
+        try:
+            raw = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(raw, dict):
+            out.append(raw)
+    return out
+
+
+def _extract_candles() -> tuple[list[dict[str, Any]], list[str]]:
+    reason_codes: list[str] = []
+    tried_sources: list[str] = []
+
+    # Priority A: data/simple/one_second_evidence.jsonl
+    tried_sources.append("ONE_SECOND_EVIDENCE_JSONL")
+    evidence_rows = _load_1s_evidence_jsonl_tail(ONE_SECOND_EVIDENCE_JSONL_PATH, max_lines=600)
+    if evidence_rows:
+        candles = _aggregate_seconds_to_1m(evidence_rows)
+        if len(candles) >= 5:
+            reason_codes.append("CANDLES_FROM_1S_EVIDENCE")
+            return candles, reason_codes
+
+    # Priority B: state/simple/latest_1s_evidence.json
+    tried_sources.append("LATEST_1S_EVIDENCE")
+    evidence_state = _load_json(LATEST_1S_EVIDENCE_PATH)
+    if evidence_state:
+        raw_points = (
+            evidence_state.get("recent_buckets")
+            or evidence_state.get("candles")
+            or evidence_state.get("evidence_points")
+            or []
+        )
+        if isinstance(raw_points, list):
+            candles = _aggregate_seconds_to_1m([x for x in raw_points if isinstance(x, dict)])
+            if len(candles) >= 5:
+                reason_codes.append("CANDLES_FROM_LATEST_1S_EVIDENCE")
+                return candles, reason_codes
+
+    # Priority C: state/simple/latest_hybrid_candle_dna.json
+    tried_sources.append("LATEST_HYBRID_CANDLE_DNA")
+    hybrid = _load_json(LATEST_HYBRID_DNA_PATH)
+    if hybrid:
+        raw = hybrid.get("candles") or hybrid.get("official_candle")
+        rows: list[dict[str, Any]] = []
+        if isinstance(raw, list):
+            rows = [x for x in raw if isinstance(x, dict)]
+        elif isinstance(raw, dict):
+            rows = [raw]
+        candles = []
+        prev_close: float | None = None
+        for row in rows:
+            normalized = _normalize_candle_like(row, prev_close=prev_close)
+            if normalized:
+                candles.append(normalized)
+                prev_close = float(normalized["close"])
+        if candles:
+            reason_codes.append("CANDLES_FROM_HYBRID_DNA")
+            return candles, reason_codes
+
+    # Priority D: state/simple/latest_market_truth.json
+    tried_sources.append("LATEST_MARKET_TRUTH")
+    market_truth = _load_json(LATEST_MARKET_TRUTH_PATH)
+    if market_truth:
+        raw = market_truth.get("candles") or market_truth.get("ohlc_candles") or market_truth.get("official_candle")
+        rows = []
+        if isinstance(raw, list):
+            rows = [x for x in raw if isinstance(x, dict)]
+        elif isinstance(raw, dict):
+            rows = [raw]
+        candles = []
+        prev_close = None
+        for row in rows:
+            normalized = _normalize_candle_like(row, prev_close=prev_close)
+            if normalized:
+                candles.append(normalized)
+                prev_close = float(normalized["close"])
+        if candles:
+            reason_codes.append("CANDLES_FROM_MARKET_TRUTH")
+            return candles, reason_codes
+
+    reason_codes.append("INSUFFICIENT_CANDLES_FOR_STRUCTURE")
+    reason_codes.extend([f"SOURCE_TRIED_{name}" for name in tried_sources])
+    if not ONE_SECOND_EVIDENCE_JSONL_PATH.exists():
+        reason_codes.append("SOURCE_FILE_MISSING")
+    return [], sorted(set(reason_codes))
+
+
 def _sample_candles(symbol: str) -> list[dict[str, Any]]:
     candles: list[dict[str, Any]] = []
     base = 100_000.0 if symbol.upper().startswith("BTC") else 100.0
@@ -51,26 +244,6 @@ def _sample_candles(symbol: str) -> list[dict[str, Any]]:
         low = close - 6.0
         candles.append({"open": open_, "high": high, "low": low, "close": close, "ts": idx * 60})
     return candles
-
-
-def _extract_candles() -> tuple[list[dict[str, Any]], list[str]]:
-    reason_codes: list[str] = []
-    market_truth = _load_json(LATEST_MARKET_TRUTH_PATH)
-    if market_truth is None and not LATEST_MARKET_TRUTH_PATH.exists():
-        reason_codes.append("SOURCE_FILE_MISSING")
-    if market_truth:
-        raw = market_truth.get("candles") or market_truth.get("ohlc_candles") or []
-        candles = [c for c in raw if isinstance(c, dict) and all(k in c for k in ("high", "low", "close"))]
-        if candles:
-            return candles, reason_codes
-
-    hybrid = _load_json(LATEST_HYBRID_DNA_PATH)
-    if hybrid:
-        raw = hybrid.get("candles") or hybrid.get("dna_candles") or []
-        candles = [c for c in raw if isinstance(c, dict) and all(k in c for k in ("high", "low", "close"))]
-        if candles:
-            return candles, reason_codes
-    return [], reason_codes
 
 
 def _detect_swings(candles: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -143,13 +316,16 @@ def _bos_choch(candles: list[dict[str, Any]], swing_highs: list[dict[str, Any]],
 
 def build_market_structure_v2(symbol: str = "BTCUSDT", candles_override: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     reason_codes: list[str] = []
-    candles = candles_override if candles_override is not None else _extract_candles()[0]
-    if candles_override is None:
-        _, extract_reasons = _extract_candles()
+    if candles_override is not None:
+        candles = candles_override
+    else:
+        candles, extract_reasons = _extract_candles()
         reason_codes.extend(extract_reasons)
 
     if not candles:
-        reason_codes = sorted(set(reason_codes + ["SOURCE_FILE_MISSING", "INSUFFICIENT_CANDLES", "NO_SWINGS_FOUND"]))
+        reason_codes = sorted(
+            set(reason_codes + ["SOURCE_FILE_MISSING", "INSUFFICIENT_CANDLES_FOR_STRUCTURE", "NO_SWINGS_FOUND"])
+        )
         return {
             "timestamp_utc": _utc_now(),
             "block_id": BLOCK_ID,
@@ -177,7 +353,7 @@ def build_market_structure_v2(symbol: str = "BTCUSDT", candles_override: list[di
         }
 
     if len(candles) < MIN_CANDLES:
-        reason_codes.append("INSUFFICIENT_CANDLES")
+        reason_codes.append("INSUFFICIENT_CANDLES_FOR_STRUCTURE")
 
     swing_highs, swing_lows = _detect_swings(candles)
     if not swing_highs and not swing_lows:
@@ -189,7 +365,7 @@ def build_market_structure_v2(symbol: str = "BTCUSDT", candles_override: list[di
     structure_bias, trend_direction, regime_hint = _bias_and_direction(swing_highs, swing_lows)
     bos, choch = _bos_choch(candles, swing_highs, swing_lows)
 
-    not_ready = "INSUFFICIENT_CANDLES" in reason_codes or "NO_SWINGS_FOUND" in reason_codes
+    not_ready = "INSUFFICIENT_CANDLES_FOR_STRUCTURE" in reason_codes or "NO_SWINGS_FOUND" in reason_codes
     structure_status = "NOT_READY" if not_ready else "READY"
     if structure_status == "NOT_READY":
         structure_bias = "NEUTRAL"
