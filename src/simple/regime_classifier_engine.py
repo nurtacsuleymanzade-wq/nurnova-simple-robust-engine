@@ -9,7 +9,9 @@ from src.simple.research_runtime import current_runtime_context, write_json
 
 BLOCK_ID = "REGIME_CLASSIFIER"
 STATE_DIR = Path("state/simple")
+DATA_DIR = Path("data/simple/epoch_v2")
 OUTPUT_PATH = STATE_DIR / "latest_regime_classifier.json"
+HISTORY_PATH = DATA_DIR / "regime_classifier_history.jsonl"
 
 MARKET_STRUCTURE_V2_PATH = STATE_DIR / "latest_market_structure_v2.json"
 LIQUIDITY_STRUCTURE_PATH = STATE_DIR / "latest_liquidity_structure.json"
@@ -41,6 +43,12 @@ def _load_json(path: Path) -> dict[str, Any] | None:
         return raw if isinstance(raw, dict) else None
     except Exception:
         return None
+
+
+def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -81,18 +89,34 @@ def _build_allowed(primary_regime: str, directional_bias: str) -> tuple[list[str
     elif primary_regime == "TREND" and directional_bias == "SHORT":
         allowed = ["TREND_CONTINUATION_SHORT", "PULLBACK_CONTINUATION_SHORT"]
     elif primary_regime == "RANGE":
-        allowed = ["RANGE_ROTATION_LONG", "RANGE_ROTATION_SHORT", "LIQUIDITY_SWEEP_REVERSAL"]
+        allowed = [
+            "RANGE_ROTATION_LONG",
+            "RANGE_ROTATION_SHORT",
+            "LIQUIDITY_SWEEP_REVERSAL_LONG",
+            "LIQUIDITY_SWEEP_REVERSAL_SHORT",
+        ]
     elif primary_regime == "COMPRESSION":
-        allowed = ["BREAKOUT_EXPANSION"]
-        reasons.append("COMPRESSION_BREAKOUT_CANDIDATE_ONLY")
+        allowed = ["BREAKOUT_EXPANSION_LONG", "BREAKOUT_EXPANSION_SHORT"]
+        reasons.append("COMPRESSION_BREAKOUT_CANDIDATE_ONLY_NO_ENTRY_PERMISSION")
     elif primary_regime == "EXPANSION":
+        allowed = [
+            "TREND_CONTINUATION_LONG",
+            "TREND_CONTINUATION_SHORT",
+            "PULLBACK_CONTINUATION_LONG",
+            "PULLBACK_CONTINUATION_SHORT",
+        ]
         reasons.append("LATE_ENTRY_RISK_EXPANSION")
     elif primary_regime == "REVERSAL":
-        allowed = ["ABSORPTION_REVERSAL", "SWEEP_REVERSAL"]
+        allowed = [
+            "ABSORPTION_REVERSAL_LONG",
+            "ABSORPTION_REVERSAL_SHORT",
+            "SWEEP_REVERSAL_LONG",
+            "SWEEP_REVERSAL_SHORT",
+        ]
     elif primary_regime == "ROTATION":
         allowed = ["RANGE_ROTATION_LONG", "RANGE_ROTATION_SHORT"]
     else:
-        blocked = ["ALL_SETUPS_UNKNOWN_REGIME"]
+        blocked = []
     return allowed, blocked, reasons
 
 
@@ -149,7 +173,7 @@ def _infer_regime(structure: dict[str, Any], liquidity: dict[str, Any] | None, v
 
     if trend_dir in ("LONG", "SHORT") and directional_bias in ("LONG", "SHORT") and trend_dir != directional_bias:
         directional_bias = "NEUTRAL"
-        reasons.append("BIAS_CONFLICT_WITH_TREND_DIRECTION")
+        reasons.append("REGIME_STRUCTURE_DIRECTION_CONFLICT")
 
     return primary_regime, trend_strength, range_strength, compression_score, expansion_score, reversal_risk, directional_bias, reasons
 
@@ -189,6 +213,7 @@ def build_regime_classifier(
             "blocked_setup_families": ["ALL_SETUPS_STRUCTURE_MISSING"],
             "confidence": 0.0,
             "reason_codes": reason_codes,
+            "metadata_only": True,
             "source": {"market_structure_v2": str(MARKET_STRUCTURE_V2_PATH)},
             "feeds_next": FEEDS_NEXT,
         }
@@ -229,7 +254,7 @@ def build_regime_classifier(
     )
     if bias == "NEUTRAL" and str(structure.get("structure_bias", "NEUTRAL")).upper() in ("LONG", "SHORT"):
         confidence = min(confidence, 0.45)
-        reason_codes.append("CONFIDENCE_CLAMPED_BIAS_CONFLICT")
+        reason_codes.append("REGIME_STRUCTURE_DIRECTION_CONFLICT")
     if primary == "UNKNOWN":
         confidence = min(confidence, 0.35)
     if vol_state == "UNKNOWN":
@@ -266,6 +291,7 @@ def build_regime_classifier(
         "blocked_setup_families": blocked,
         "confidence": round(_clamp(confidence), 3),
         "reason_codes": sorted(set(reason_codes)),
+        "metadata_only": True,
         "source": {"market_structure_v2": str(MARKET_STRUCTURE_V2_PATH)},
         "feeds_next": FEEDS_NEXT,
         "volatility_score": round(_clamp(vol_score), 3),
@@ -297,4 +323,5 @@ def run_regime_classifier_engine(symbol: str = "BTCUSDT", fake_sample: bool = Fa
     payload["context_id"] = context.get("context_id")
     payload["loop_id"] = context.get("loop_id")
     write_json(OUTPUT_PATH, payload)
+    _append_jsonl(HISTORY_PATH, payload)
     return payload
