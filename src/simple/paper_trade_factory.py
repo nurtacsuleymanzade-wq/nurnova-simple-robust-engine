@@ -48,6 +48,11 @@ INTERPRETATION_PATH = STATE_DIR / "latest_interpretation.json"
 MODEL_SURVIVAL_FILTER_PATH = epoch_state_path("latest_model_survival_filter.json")
 RESEARCH_EDGE_MATRIX_PATH = epoch_state_path("latest_research_edge_matrix.json")
 ZONE_CONTEXT_PATH = STATE_DIR / "latest_zone_context.json"
+CONTRACT_DECISION_PATH = STATE_DIR / "latest_contract_decision_gate.json"
+CONTRACT_TRADE_PLAN_PATH = STATE_DIR / "latest_contract_trade_plan.json"
+SETUP_CONTRACT_PATH = STATE_DIR / "latest_setup_contract.json"
+REGIME_CLASSIFIER_PATH = STATE_DIR / "latest_regime_classifier.json"
+MARKET_STRUCTURE_V2_PATH = STATE_DIR / "latest_market_structure_v2.json"
 
 MAX_OPEN_TOTAL = 6
 MAX_OPEN_PER_MODEL_ID = 1
@@ -57,6 +62,8 @@ MAX_OPEN_PER_EVENT_ID = 1
 NEW_TRADES_CAP_PER_LOOP = 1
 ALLOWED_RESEARCH_BANDS = {"STRONG_ACTIVE", "ACTIVE", "EARLY_RESEARCH"}
 MAX_TOP_CANDIDATES = 20
+MAX_OPEN_PER_CONTRACT_DIRECTION = 2
+MAX_OPEN_PER_CONTRACT_SIDE = 3
 
 
 def _current_price(observation: dict[str, Any], dna: dict[str, Any]) -> float | None:
@@ -769,8 +776,43 @@ def _compact_trade_snapshot(trade: dict[str, Any]) -> dict[str, Any]:
         "execution_safety",
         "model_status",
         "survival_filter",
+        "paper_source",
+        "contract_id",
+        "decision_status",
+        "structure_bias",
+        "primary_regime",
+        "regime",
+        "liquidity_bias",
+        "opened_at",
     )
     return {field: trade.get(field) for field in keep_fields if field in trade}
+
+
+def _entries_near(a: Any, b: Any) -> bool:
+    av = safe_float(a)
+    bv = safe_float(b)
+    if av is None or bv is None:
+        return False
+    return abs(av - bv) <= max(0.05, abs(av) * 0.0005)
+
+
+def _contract_duplicate_count(
+    open_trades: list[dict[str, Any]],
+    contract_id: str,
+    direction: str,
+    entry: float,
+) -> int:
+    count = 0
+    for trade in open_trades:
+        if str(trade.get("status") or "").upper() != "OPEN":
+            continue
+        if str(trade.get("contract_id") or "") != contract_id:
+            continue
+        if str(trade.get("direction") or "").upper() != direction:
+            continue
+        if _entries_near(trade.get("entry"), entry):
+            count += 1
+    return count
 
 
 def run_paper_trade_factory() -> dict[str, Any]:
@@ -789,6 +831,11 @@ def run_paper_trade_factory() -> dict[str, Any]:
     model_survival = load_json(MODEL_SURVIVAL_FILTER_PATH) or {}
     edge_matrix = load_json(RESEARCH_EDGE_MATRIX_PATH) or {}
     zone_context = load_json(ZONE_CONTEXT_PATH) or {}
+    contract_decision = load_json(CONTRACT_DECISION_PATH) or {}
+    contract_trade_plan = load_json(CONTRACT_TRADE_PLAN_PATH) or {}
+    setup_contract = load_json(SETUP_CONTRACT_PATH) or {}
+    regime_classifier = load_json(REGIME_CLASSIFIER_PATH) or {}
+    market_structure_v2 = load_json(MARKET_STRUCTURE_V2_PATH) or {}
     registry = load_model_survival_registry()
     lifecycle, lifecycle_reason = safe_read_json(RESEARCH_LIFECYCLE_PATH, default={}, max_bytes=500_000)
     lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
@@ -828,6 +875,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
     pending_model_family_directions: dict[str, set[str]] = {}
     pending_event_bucket_directions: dict[str, set[str]] = {}
     allowed_research_band_counts: Counter[str] = Counter()
+    contract_bridge_reason_codes: list[str] = []
     paper_safety = {
         "max_new_trades_per_loop": NEW_TRADES_CAP_PER_LOOP,
         "max_open_total": MAX_OPEN_TOTAL,
@@ -855,6 +903,108 @@ def run_paper_trade_factory() -> dict[str, Any]:
 
     trades: list[dict[str, Any]] = []
     new_trade_slots_used = 0
+
+    decision_status = str(contract_decision.get("decision_status") or "").upper()
+    plan_status = str(contract_trade_plan.get("plan_status") or "").upper()
+    contract_direction = str(contract_trade_plan.get("direction") or contract_decision.get("direction") or "UNKNOWN").upper()
+    contract_entry = safe_float(contract_trade_plan.get("entry"))
+    contract_stop_loss = safe_float(contract_trade_plan.get("stop_loss"))
+    contract_tp1 = safe_float(contract_trade_plan.get("tp1"))
+    contract_tp2 = safe_float(contract_trade_plan.get("tp2"))
+    contract_id = str(contract_trade_plan.get("contract_id") or contract_decision.get("contract_id") or "")
+    setup_family = str(contract_trade_plan.get("setup_family") or contract_decision.get("setup_family") or "UNKNOWN")
+    contract_trade_opened = False
+
+    if decision_status != "ALLOW_PAPER":
+        contract_bridge_reason_codes.append("CONTRACT_DECISION_NOT_ALLOWING")
+    elif plan_status != "PLAN_READY":
+        contract_bridge_reason_codes.append("CONTRACT_PLAN_INCOMPLETE")
+    elif contract_entry is None or contract_stop_loss is None or contract_tp1 is None:
+        contract_bridge_reason_codes.append("CONTRACT_PLAN_INCOMPLETE")
+    elif contract_direction not in {"LONG", "SHORT"} or not contract_id:
+        contract_bridge_reason_codes.append("CONTRACT_PLAN_INCOMPLETE")
+    else:
+        duplicate_count = _contract_duplicate_count(open_trades, contract_id, contract_direction, contract_entry)
+        direction_open_count = sum(
+            1
+            for trade in open_trades
+            if str(trade.get("status") or "").upper() == "OPEN"
+            and str(trade.get("direction") or "").upper() == contract_direction
+        )
+        if duplicate_count >= MAX_OPEN_PER_CONTRACT_DIRECTION:
+            contract_bridge_reason_codes.append("CONTRACT_DUPLICATE_BLOCKED")
+        elif direction_open_count >= MAX_OPEN_PER_CONTRACT_SIDE:
+            contract_bridge_reason_codes.append("DIRECTION_OPEN_LIMIT_BLOCKED")
+        else:
+            rr_fields = _derive_rr_fields(contract_direction, contract_entry, contract_stop_loss, contract_tp1, contract_tp2)
+            opened_ts = utc_now()
+            contract_seed = f"{context.get('loop_id')}|{contract_id}|{contract_direction}|{contract_entry}"
+            trades.append(
+                {
+                    "epoch_id": ACTIVE_EPOCH_ID,
+                    "symbol": str(observation.get("symbol") or contract_trade_plan.get("symbol") or "BTCUSDT"),
+                    "paper_trade_id": _paper_trade_id(contract_seed, contract_entry),
+                    "context_id": context.get("context_id"),
+                    "loop_id": context.get("loop_id"),
+                    "paper_source": "CONTRACT_DECISION_GATE",
+                    "contract_id": contract_id,
+                    "setup_family": setup_family,
+                    "direction": contract_direction,
+                    "entry": contract_entry,
+                    "stop_loss": contract_stop_loss,
+                    "tp1": contract_tp1,
+                    "tp2": contract_tp2,
+                    "rr1": rr_fields.get("rr1"),
+                    "rr2": rr_fields.get("rr2"),
+                    "risk_distance": rr_fields.get("risk_distance"),
+                    "tp1_distance": rr_fields.get("tp1_distance"),
+                    "tp2_distance": rr_fields.get("tp2_distance"),
+                    "decision_status": "ALLOW_PAPER",
+                    "structure_bias": str((market_structure_v2 or {}).get("structure_bias") or ((contract_decision.get("metadata") or {}).get("structure_bias") or "UNKNOWN")),
+                    "primary_regime": str((regime_classifier or {}).get("primary_regime") or "UNKNOWN"),
+                    "regime": str((regime_classifier or {}).get("regime") or (regime_classifier or {}).get("primary_regime") or "UNKNOWN"),
+                    "liquidity_bias": str((setup_contract or {}).get("liquidity_bias") or ((contract_decision.get("metadata") or {}).get("liquidity_bias") or "UNKNOWN")),
+                    "status": "OPEN",
+                    "outcome_status": "OPEN",
+                    "opened_at": opened_ts,
+                    "opened_at_utc": opened_ts,
+                    "valid_for_lifecycle": True,
+                    "valid_for_edge": True,
+                    "invalid_for_edge": False,
+                    "event_id": f"CONTRACT|{contract_id}|{contract_direction}",
+                    "event_bucket_5m": f"CONTRACT|{contract_id}",
+                    "event_confluence_count": 1,
+                    "cause_chain": [
+                        "market_structure_v2",
+                        "regime_classifier",
+                        "setup_contract",
+                        "contract_trade_plan",
+                        "contract_decision_gate",
+                    ],
+                    "source_state_refs": source_state_refs_from_paths(
+                        {
+                            "contract_decision_gate": CONTRACT_DECISION_PATH,
+                            "contract_trade_plan": CONTRACT_TRADE_PLAN_PATH,
+                            "setup_contract": SETUP_CONTRACT_PATH,
+                            "regime_classifier": REGIME_CLASSIFIER_PATH,
+                            "market_structure_v2": MARKET_STRUCTURE_V2_PATH,
+                        }
+                    ),
+                    "reason_codes": sorted(
+                        {
+                            "CONTRACT_DECISION_GATE_SOURCE",
+                            "CONTRACT_BRIDGE_OPENED",
+                            "PAPER_ONLY",
+                            "NO_LIVE_EXECUTION",
+                            "NO_PRIVATE_API",
+                        }
+                    ),
+                    "execution_safety": {"live_order_sent": False, "private_api_used": False},
+                }
+            )
+            new_trade_slots_used += 1
+            contract_trade_opened = True
+            contract_bridge_reason_codes.append("CONTRACT_BRIDGE_TRADE_OPENED")
 
     ranked_clusters = sorted(
         selected_clusters,
@@ -1011,6 +1161,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
             "setup_family_activation_ready": activation_ready,
             "activation_band": activation_band,
                 "paper_trade_candidates": len([trade for trade in trades if str(trade.get("status") or "").upper() == "OPEN"]),
+                "contract_bridge_trade_opened": contract_trade_opened,
                 "invalid_candidates": len([trade for trade in trades if trade.get("status") == "INVALID"]),
                 "blocked_candidates": len([trade for trade in trades if trade.get("status") == "BLOCKED"]),
                 "valid_for_lifecycle_count": len([trade for trade in trades if trade.get("valid_for_lifecycle") is True]),
@@ -1021,6 +1172,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
         "reason_codes": [
             f"PAPER_TRADES_{len(trades)}",
             *selection_reason_codes,
+            *sorted(set(contract_bridge_reason_codes)),
             "LOW_QUALITY_MODELS_ALLOWED",
             "NO_LIVE_EXECUTION",
             "NO_PRIVATE_API",

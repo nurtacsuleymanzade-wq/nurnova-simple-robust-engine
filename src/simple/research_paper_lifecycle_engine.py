@@ -52,6 +52,8 @@ def _compact_trade(trade: dict[str, Any]) -> dict[str, Any]:
         "loop_id",
         "model_id",
         "setup_family",
+        "paper_source",
+        "contract_id",
         "direction",
         "entry",
         "stop_loss",
@@ -95,6 +97,12 @@ def _compact_trade(trade: dict[str, Any]) -> dict[str, Any]:
         "a_plus_ready",
         "supporting_models",
         "supporting_setups",
+        "decision_status",
+        "structure_bias",
+        "primary_regime",
+        "regime",
+        "liquidity_bias",
+        "opened_at",
     )
     compact = {field: trade.get(field) for field in keep if field in trade}
     compact["execution_safety"] = {"live_order_sent": False, "private_api_used": False}
