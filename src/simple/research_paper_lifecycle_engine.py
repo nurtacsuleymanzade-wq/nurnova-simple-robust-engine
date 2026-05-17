@@ -16,6 +16,7 @@ from src.simple.research_runtime import (
     utc_now,
     write_json,
 )
+from src.simple.lineage_event_logger import append_event, lineage_record, seen_ids, stable_id
 
 BLOCK_ID = "RESEARCH_PAPER_LIFECYCLE_ENGINE"
 OUTPUT_PATH = epoch_state_path("latest_research_paper_lifecycle.json")
@@ -357,6 +358,49 @@ def run_research_paper_lifecycle_engine() -> dict[str, Any]:
     )
     write_json(OUTPUT_PATH, output)
     append_epoch_jsonl("research_paper_lifecycle_history.jsonl", output)
+    existing_close_ids = seen_ids("paper_trade_close_events.jsonl", "paper_trade_id")
+    for trade in output.get("closed_this_loop") or []:
+        paper_trade_id = str(trade.get("paper_trade_id") or "")
+        if not paper_trade_id or paper_trade_id in existing_close_ids:
+            continue
+        lifecycle_id = stable_id("LIFE", paper_trade_id, trade.get("closed_at_utc") or now_ts)
+        append_event(
+            "paper_trade_close_events.jsonl",
+            lineage_record(
+                record_type="paper_trade_close",
+                event_id=lifecycle_id,
+                parent_id=str(trade.get("decision_id") or ""),
+                setup_id=str(trade.get("setup_id") or ""),
+                signal_id=str(trade.get("signal_id") or ""),
+                plan_id=str(trade.get("plan_id") or ""),
+                decision_id=str(trade.get("decision_id") or ""),
+                paper_trade_id=paper_trade_id,
+                lifecycle_id=lifecycle_id,
+                context_id=trade.get("context_id"),
+                loop_id=trade.get("loop_id"),
+                reason_codes=list(trade.get("reason_codes") or []),
+                feeds_next=["outcome_events"],
+                extra={"close_reason": trade.get("close_reason"), "exit_price": trade.get("exit_price")},
+            ),
+        )
+        append_event(
+            "lineage_events.jsonl",
+            lineage_record(
+                record_type="lineage_link",
+                event_id=stable_id("LIN", paper_trade_id, lifecycle_id),
+                parent_id=str(trade.get("decision_id") or ""),
+                setup_id=str(trade.get("setup_id") or ""),
+                signal_id=str(trade.get("signal_id") or ""),
+                plan_id=str(trade.get("plan_id") or ""),
+                decision_id=str(trade.get("decision_id") or ""),
+                paper_trade_id=paper_trade_id,
+                lifecycle_id=lifecycle_id,
+                context_id=trade.get("context_id"),
+                loop_id=trade.get("loop_id"),
+                feeds_next=["outcome_events"],
+            ),
+        )
+        existing_close_ids.add(paper_trade_id)
     return output
 
 

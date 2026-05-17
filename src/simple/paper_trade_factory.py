@@ -21,6 +21,7 @@ from src.simple.research_runtime import (
     utc_now,
     write_json,
 )
+from src.simple.lineage_event_logger import append_event, lineage_record, seen_ids
 from src.simple.signal_event_consolidator import derive_event_id, enrich_trade_event_fields
 from src.simple.signal_grade_engine import grade_signal_record
 
@@ -777,6 +778,10 @@ def _compact_trade_snapshot(trade: dict[str, Any]) -> dict[str, Any]:
         "model_status",
         "survival_filter",
         "paper_source",
+        "setup_id",
+        "signal_id",
+        "plan_id",
+        "decision_id",
         "contract_id",
         "decision_status",
         "structure_bias",
@@ -905,6 +910,11 @@ def run_paper_trade_factory() -> dict[str, Any]:
     new_trade_slots_used = 0
 
     decision_status = str(contract_decision.get("decision_status") or "").upper()
+    execution_permission = str(contract_decision.get("execution_permission") or "").upper()
+    setup_id = str(contract_trade_plan.get("setup_id") or contract_decision.get("setup_id") or "")
+    signal_id = str(contract_trade_plan.get("signal_id") or contract_decision.get("signal_id") or "")
+    plan_id = str(contract_trade_plan.get("plan_id") or contract_decision.get("plan_id") or "")
+    decision_id = str(contract_decision.get("decision_id") or "")
     plan_status = str(contract_trade_plan.get("plan_status") or "").upper()
     contract_direction = str(contract_trade_plan.get("direction") or contract_decision.get("direction") or "UNKNOWN").upper()
     contract_entry = safe_float(contract_trade_plan.get("entry"))
@@ -915,7 +925,9 @@ def run_paper_trade_factory() -> dict[str, Any]:
     setup_family = str(contract_trade_plan.get("setup_family") or contract_decision.get("setup_family") or "UNKNOWN")
     contract_trade_opened = False
 
-    if decision_status != "ALLOW_PAPER":
+    if execution_permission != "ALLOW_OPEN":
+        contract_bridge_reason_codes.append("EXECUTION_PERMISSION_NOT_ALLOW_OPEN")
+    elif decision_status != "ALLOW_PAPER":
         contract_bridge_reason_codes.append("CONTRACT_DECISION_NOT_ALLOWING")
     elif plan_status != "PLAN_READY":
         contract_bridge_reason_codes.append("CONTRACT_PLAN_INCOMPLETE")
@@ -923,6 +935,8 @@ def run_paper_trade_factory() -> dict[str, Any]:
         contract_bridge_reason_codes.append("CONTRACT_PLAN_INCOMPLETE")
     elif contract_direction not in {"LONG", "SHORT"} or not contract_id:
         contract_bridge_reason_codes.append("CONTRACT_PLAN_INCOMPLETE")
+    elif not setup_id or not signal_id or not plan_id or not decision_id:
+        contract_bridge_reason_codes.append("CHAIN_ID_MISSING")
     else:
         duplicate_count = _contract_duplicate_count(open_trades, contract_id, contract_direction, contract_entry)
         direction_open_count = sum(
@@ -947,6 +961,10 @@ def run_paper_trade_factory() -> dict[str, Any]:
                     "context_id": context.get("context_id"),
                     "loop_id": context.get("loop_id"),
                     "paper_source": "CONTRACT_DECISION_GATE",
+                    "setup_id": setup_id,
+                    "signal_id": signal_id,
+                    "plan_id": plan_id,
+                    "decision_id": decision_id,
                     "contract_id": contract_id,
                     "setup_family": setup_family,
                     "direction": contract_direction,
@@ -999,6 +1017,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
                             "NO_PRIVATE_API",
                         }
                     ),
+                    "blocked_by": [],
                     "execution_safety": {"live_order_sent": False, "private_api_used": False},
                 }
             )
@@ -1223,6 +1242,38 @@ def run_paper_trade_factory() -> dict[str, Any]:
 
     write_json(OUTPUT_PATH, output)
     append_epoch_jsonl("paper_trade_factory_history.jsonl", output)
+    existing_open_ids = seen_ids("paper_trade_open_events.jsonl", "paper_trade_id")
+    for trade in newest_opened_this_loop:
+        paper_trade_id = str(trade.get("paper_trade_id") or "")
+        if not paper_trade_id or paper_trade_id in existing_open_ids:
+            continue
+        append_event(
+            "paper_trade_open_events.jsonl",
+            lineage_record(
+                record_type="paper_trade_open",
+                event_id=f"OPEN_{paper_trade_id}",
+                parent_id=str(trade.get("decision_id") or ""),
+                setup_id=str(trade.get("setup_id") or ""),
+                signal_id=str(trade.get("signal_id") or ""),
+                plan_id=str(trade.get("plan_id") or ""),
+                decision_id=str(trade.get("decision_id") or ""),
+                paper_trade_id=paper_trade_id,
+                context_id=trade.get("context_id"),
+                loop_id=trade.get("loop_id"),
+                reason_codes=list(trade.get("reason_codes") or []),
+                blocked_by=list(trade.get("blocked_by") or []),
+                feeds_next=["paper_trade_close_events", "outcome_events"],
+                extra={
+                    "entry": trade.get("entry"),
+                    "stop_loss": trade.get("stop_loss"),
+                    "tp1": trade.get("tp1"),
+                    "tp2": trade.get("tp2"),
+                    "rr1": trade.get("rr1"),
+                    "rr2": trade.get("rr2"),
+                },
+            ),
+        )
+        existing_open_ids.add(paper_trade_id)
     return output
 
 

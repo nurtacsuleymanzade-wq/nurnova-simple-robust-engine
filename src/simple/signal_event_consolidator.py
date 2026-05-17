@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from src.core.model_survival_registry import load_model_survival_registry, split_active_quarantined, update_model_survival_report
+from src.simple.lineage_event_logger import append_event, lineage_record, stable_id
 from src.simple.research_epoch import ACTIVE_EPOCH_ID, append_epoch_jsonl, epoch_data_path, epoch_state_path
 from src.simple.research_runtime import current_runtime_context, load_json, safe_float, source_state_refs_from_paths, stamp_payload, write_json
 
@@ -122,6 +123,8 @@ def _merge_event(items: list[dict[str, Any]]) -> dict[str, Any]:
         "source_trade_ids": [item.get("paper_trade_id") for item in ranked if item.get("paper_trade_id")],
         "source_state_refs": source_state_refs_from_paths({"paper_trade_factory": FACTORY_PATH, "signal_grade": GRADE_PATH, "setup_activation": SETUP_PATH, "timeframe_resolution": TIMEFRAME_PATH}),
         "execution_safety": {"live_order_sent": False, "private_api_used": False},
+        "setup_id": primary.get("setup_id"),
+        "signal_id": primary.get("signal_id") or stable_id("SIG", primary.get("event_id"), primary.get("symbol"), primary.get("direction")),
     }
 
 
@@ -173,6 +176,27 @@ def run_signal_event_consolidator() -> dict[str, Any]:
     )
     write_json(OUTPUT_PATH, output)
     append_epoch_jsonl("signal_event_history.jsonl", output)
+    for event in events[:50]:
+        setup_id = str(event.get("setup_id") or "")
+        signal_id = str(event.get("signal_id") or "")
+        if not setup_id or not signal_id:
+            continue
+        append_event(
+            "signal_events_clean.jsonl",
+            lineage_record(
+                record_type="signal_event",
+                event_id=signal_id,
+                parent_id=setup_id,
+                setup_id=setup_id,
+                signal_id=signal_id,
+                context_id=context.get("context_id"),
+                loop_id=context.get("loop_id"),
+                reason_codes=list(event.get("grade_reasons") or []),
+                blocked_by=list(event.get("grade_blockers") or []),
+                feeds_next=["trade_plan_events"],
+                extra={"symbol": event.get("symbol"), "direction": event.get("direction")},
+            ),
+        )
     return output
 
 

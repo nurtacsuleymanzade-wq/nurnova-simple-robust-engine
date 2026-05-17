@@ -1,12 +1,12 @@
 # Contract Edge Matrix - Latest Report
 
-- Timestamp: 2026-05-16T14:48:28Z
-- General performance: winrate=0.8333 expectancy=0.8333 pf=6.0
-- Contract sample count: 5
-- Legacy sample count: 1
-- Best early contract: SC003
-- Worst early contract: SC003
-- Best regime: TREND
-- Usable samples (>=5): 1
-- Estimated paper trades/day: 6.0
-- Next action: MONITOR_EARLY_SIGNALS
+- Timestamp: 2026-05-16T16:46:21Z
+- General performance: winrate=0.0 expectancy=0.0 pf=0.0
+- Contract sample count: 0
+- Legacy sample count: 678
+- Best early contract: N/A
+- Worst early contract: N/A
+- Best regime: N/A
+- Usable samples (>=5): 0
+- Estimated paper trades/day: 678.0
+- Next action: KEEP_SAMPLING

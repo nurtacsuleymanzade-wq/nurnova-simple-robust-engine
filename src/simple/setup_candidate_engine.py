@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from src.simple.lineage_event_logger import stable_id
+
 BLOCK_ID = "S6_SCENARIO_SETUP_CANDIDATE"
 FEEDS_NEXT = {"next_blocks": ["S7_TRADE_PLAN_DECISION_GATE"]}
 
@@ -454,6 +456,8 @@ def build_setup_candidate(
     s5: dict[str, Any] | None,
     source_mode: str,
 ) -> dict[str, Any]:
+    timestamp = _utc_now()
+    setup_id = stable_id("SETUP", symbol, source_mode, timestamp)
     input_status = _calc_input_status(s1, s2, s3, s4, s5)
     quality_weight = (
         float(s4.get("quality_weight", 0.5))
@@ -481,8 +485,18 @@ def build_setup_candidate(
     )
 
     return {
-        "timestamp_utc": _utc_now(),
+        "timestamp_utc": timestamp,
         "block_id": BLOCK_ID,
+        "record_type": "setup_candidate",
+        "event_id": setup_id,
+        "setup_id": setup_id,
+        "signal_id": None,
+        "plan_id": None,
+        "decision_id": None,
+        "paper_trade_id": None,
+        "outcome_id": None,
+        "parent_id": None,
+        "blocked_by": [],
         "symbol": symbol,
         "source": {
             "source_mode": source_mode,

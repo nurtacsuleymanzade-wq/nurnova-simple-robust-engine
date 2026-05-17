@@ -10,6 +10,7 @@ from src.edge.edge_io import append_jsonl_stream, write_json_atomic
 from src.simple.jsonl_tail_reader import read_jsonl_tail_objects
 from src.simple.research_epoch import epoch_data_path, epoch_state_path
 from src.simple.research_runtime import current_runtime_context, load_json, safe_float, source_state_refs_from_paths, stamp_payload
+from src.simple.lineage_event_logger import append_event, lineage_record, seen_ids, stable_id
 
 BLOCK_ID = "TRUE_OUTCOME_ENGINE"
 MAX_TAIL_ROWS = 5000
@@ -357,6 +358,12 @@ def replay_trade_outcome(trade: dict[str, Any], candles: list[dict[str, Any]], r
         "context_tf": trade.get("context_tf"),
         "structure_tf": trade.get("structure_tf"),
         "plan_style": trade.get("plan_style"),
+        "setup_id": trade.get("setup_id"),
+        "signal_id": trade.get("signal_id"),
+        "plan_id": trade.get("plan_id"),
+        "decision_id": trade.get("decision_id"),
+        "context_id": trade.get("context_id"),
+        "loop_id": trade.get("loop_id"),
     }
 
 
@@ -502,6 +509,82 @@ def run_true_outcome_engine() -> dict[str, Any]:
     )
     write_json_atomic(OUTPUT_PATH, output)
     append_jsonl_stream(HISTORY_PATH, output)
+    existing_outcome_ids = seen_ids("outcome_events.jsonl", "paper_trade_id")
+    existing_edge_ids = seen_ids("edge_events.jsonl", "outcome_id")
+    for item in outcomes:
+        paper_trade_id = str(item.get("paper_trade_id") or "")
+        closed = str(item.get("outcome_status") or "").upper() in {"TP1_HIT", "TP2_HIT", "SL_HIT", "EXPIRED"}
+        if not paper_trade_id or not closed or paper_trade_id in existing_outcome_ids:
+            continue
+        outcome_id = stable_id("OUT", paper_trade_id, item.get("closed_at_utc"))
+        outcome_event = lineage_record(
+            record_type="outcome_event",
+            event_id=outcome_id,
+            parent_id=str(item.get("decision_id") or ""),
+            setup_id=str(item.get("setup_id") or ""),
+            signal_id=str(item.get("signal_id") or ""),
+            plan_id=str(item.get("plan_id") or ""),
+            decision_id=str(item.get("decision_id") or ""),
+            paper_trade_id=paper_trade_id,
+            outcome_id=outcome_id,
+            context_id=item.get("context_id"),
+            loop_id=item.get("loop_id"),
+            reason_codes=list(item.get("reason_codes") or []),
+            feeds_next=["edge_events"],
+            extra={
+                "parent_decision_id": item.get("decision_id"),
+                "parent_plan_id": item.get("plan_id"),
+                "parent_signal_id": item.get("signal_id"),
+                "parent_setup_id": item.get("setup_id"),
+                "side": item.get("direction"),
+                "entry": item.get("entry"),
+                "sl": item.get("stop_loss"),
+                "tp1": item.get("tp1"),
+                "tp2": item.get("tp2"),
+                "close_price": item.get("entry") if item.get("realized_r") is None else item.get("entry"),
+                "outcome_status": item.get("outcome_status"),
+                "mfe": item.get("mfe"),
+                "mae": item.get("mae"),
+                "duration_seconds": item.get("hold_seconds"),
+            },
+        )
+        append_event("outcome_events.jsonl", outcome_event)
+        if outcome_id not in existing_edge_ids:
+            append_event(
+                "edge_events.jsonl",
+                lineage_record(
+                    record_type="edge_event",
+                    event_id=stable_id("EDGE", outcome_id, paper_trade_id),
+                    parent_id=outcome_id,
+                    setup_id=str(item.get("setup_id") or ""),
+                    signal_id=str(item.get("signal_id") or ""),
+                    plan_id=str(item.get("plan_id") or ""),
+                    decision_id=str(item.get("decision_id") or ""),
+                    paper_trade_id=paper_trade_id,
+                    outcome_id=outcome_id,
+                    context_id=item.get("context_id"),
+                    loop_id=item.get("loop_id"),
+                    reason_codes=list(item.get("reason_codes") or []),
+                    extra={
+                        "edge_event_id": stable_id("EDGE", outcome_id, paper_trade_id),
+                        "scenario_type": item.get("setup_family"),
+                        "setup_family": item.get("setup_family"),
+                        "signal_grade": item.get("signal_grade"),
+                        "decision_reason": ",".join(item.get("reason_codes") or []),
+                        "regime": item.get("regime"),
+                        "structure_state": item.get("structure_tf"),
+                        "liquidity_state": item.get("liquidity_bias"),
+                        "wall_state": None,
+                        "rr": item.get("r_result"),
+                        "outcome_status": item.get("outcome_status"),
+                        "pnl_pct": None,
+                        "mfe": item.get("mfe"),
+                        "mae": item.get("mae"),
+                    },
+                ),
+            )
+            existing_edge_ids.add(outcome_id)
+        existing_outcome_ids.add(paper_trade_id)
     write_json_atomic(DATASET_PATH, dataset_output)
     append_jsonl_stream(DATASET_HISTORY_PATH, dataset_output)
     _write_report(outcomes, dataset_output)

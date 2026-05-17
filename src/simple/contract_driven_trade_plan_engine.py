@@ -7,6 +7,7 @@ from typing import Any
 
 from src.simple.research_runtime import current_runtime_context, write_json
 from src.simple.setup_contract_registry import load_setup_contract_registry
+from src.simple.lineage_event_logger import append_event, lineage_record, stable_id
 
 BLOCK_ID = "CONTRACT_DRIVEN_TRADE_PLAN"
 STATE_DIR = Path("state/simple")
@@ -19,6 +20,7 @@ LIQUIDITY_PATH = STATE_DIR / "latest_liquidity_structure.json"
 SETUP_CANDIDATE_PATH = STATE_DIR / "latest_setup_candidate.json"
 DEPTH_MEMORY_PATH = STATE_DIR / "latest_depth_memory.json"
 VOLUME_PROFILE_PATH = STATE_DIR / "latest_volume_profile.json"
+SIGNAL_EVENT_PATH = STATE_DIR / "latest_signal_event.json"
 
 OUTPUT_PATH = STATE_DIR / "latest_contract_trade_plan.json"
 HISTORY_PATH = DATA_DIR / "contract_trade_plan_history.jsonl"
@@ -203,6 +205,7 @@ def build_contract_driven_trade_plan(
     setup_candidate_payload: dict[str, Any] | None = None,
     depth_memory_payload: dict[str, Any] | None = None,
     volume_profile_payload: dict[str, Any] | None = None,
+    signal_event_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     setup_contract = setup_contract_payload if setup_contract_payload is not None else _load_json(SETUP_CONTRACT_PATH)
     structure = structure_payload if structure_payload is not None else _load_json(MARKET_STRUCTURE_V2_PATH)
@@ -211,6 +214,29 @@ def build_contract_driven_trade_plan(
     setup_candidate = setup_candidate_payload if setup_candidate_payload is not None else _load_json(SETUP_CANDIDATE_PATH)
     _ = depth_memory_payload if depth_memory_payload is not None else _load_json(DEPTH_MEMORY_PATH)
     volume_profile = volume_profile_payload if volume_profile_payload is not None else _load_json(VOLUME_PROFILE_PATH)
+    signal_event = signal_event_payload if signal_event_payload is not None else _load_json(SIGNAL_EVENT_PATH)
+    latest_signal = (signal_event or {}).get("latest_event") or {}
+    signal_id = str(latest_signal.get("signal_id") or "")
+    setup_id = str(latest_signal.get("setup_id") or (setup_candidate or {}).get("setup_id") or "")
+    if not setup_id:
+        return {
+            "timestamp_utc": _utc_now(),
+            "block_id": BLOCK_ID,
+            "symbol": symbol,
+            "plan_status": "NOT_READY",
+            "reason_codes": ["SETUP_ID_MISSING"],
+            "feeds_next": FEEDS_NEXT,
+        }
+    if not signal_id:
+        return {
+            "timestamp_utc": _utc_now(),
+            "block_id": BLOCK_ID,
+            "symbol": symbol,
+            "setup_id": setup_id,
+            "plan_status": "NOT_READY",
+            "reason_codes": ["SIGNAL_ID_MISSING"],
+            "feeds_next": FEEDS_NEXT,
+        }
 
     reason_codes: list[str] = []
     if structure is None or setup_contract is None:
@@ -465,9 +491,17 @@ def build_contract_driven_trade_plan(
         reason_codes.append("OFF_SESSION_DOWNGRADE")
         confidence *= 0.9
 
+    plan_id = stable_id("PLAN", symbol, setup_id, signal_id, _utc_now())
     return {
         "timestamp_utc": _utc_now(),
         "block_id": BLOCK_ID,
+        "record_type": "trade_plan",
+        "plan_id": plan_id,
+        "parent_id": signal_id,
+        "setup_id": setup_id,
+        "signal_id": signal_id,
+        "parent_setup_id": setup_id,
+        "parent_signal_id": signal_id,
         "symbol": symbol,
         "source": {"source_mode": "STATE_FILE"},
         "data_quality": "OK",
@@ -540,5 +574,20 @@ def run_contract_driven_trade_plan(symbol: str = "BTCUSDT", fake_sample: bool = 
     payload["loop_id"] = context.get("loop_id")
     write_json(OUTPUT_PATH, payload)
     _append_jsonl(HISTORY_PATH, payload)
+    if payload.get("plan_id"):
+        append_event(
+            "trade_plan_events.jsonl",
+            lineage_record(
+                record_type="trade_plan_event",
+                event_id=str(payload.get("plan_id")),
+                parent_id=str(payload.get("signal_id") or ""),
+                setup_id=str(payload.get("setup_id") or ""),
+                signal_id=str(payload.get("signal_id") or ""),
+                plan_id=str(payload.get("plan_id") or ""),
+                context_id=context.get("context_id"),
+                loop_id=context.get("loop_id"),
+                reason_codes=list(payload.get("reason_codes") or []),
+                feeds_next=["decision_events"],
+            ),
+        )
     return payload
-

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from src.simple.research_runtime import current_runtime_context, write_json
+from src.simple.lineage_event_logger import append_event, lineage_record, stable_id
 
 BLOCK_ID = "CONTRACT_DECISION_GATE"
 MODE = "EXPLORATION_ALLOW_MODE"
@@ -23,6 +24,16 @@ OUTPUT_PATH = STATE_DIR / "latest_contract_decision_gate.json"
 HISTORY_PATH = DATA_DIR / "contract_decision_gate_history.jsonl"
 
 FEEDS_NEXT = ["PAPER_LIFECYCLE", "OUTCOME_TRACKER", "EDGE_MATRIX"]
+HARD_BLOCK_REASONS = {
+    "STRUCTURE_DIRECTION_CONFLICT",
+    "ENTRY_SL_TP_MISSING",
+    "SIGNAL_ID_MISSING",
+    "PLAN_ID_MISSING",
+    "RR_LOW_METADATA_ONLY",
+    "DATA_QUALITY_METADATA_ONLY",
+    "SETUP_ID_MISSING",
+    "DECISION_ID_MISSING",
+}
 
 
 def _utc_now() -> str:
@@ -107,6 +118,9 @@ def build_contract_decision_gate(
         }
 
     direction = str(trade_plan.get("direction", "NEUTRAL")).upper()
+    setup_id = str(trade_plan.get("setup_id") or "")
+    signal_id = str(trade_plan.get("signal_id") or "")
+    plan_id = str(trade_plan.get("plan_id") or "")
     entry = _as_float(trade_plan.get("entry"))
     stop_loss = _as_float(trade_plan.get("stop_loss"))
     tp1 = _as_float(trade_plan.get("tp1"))
@@ -138,6 +152,12 @@ def build_contract_decision_gate(
         block_reasons.append("STRUCTURE_DIRECTION_CONFLICT")
     if entry is None or stop_loss is None or tp1 is None:
         block_reasons.append("ENTRY_SL_TP_MISSING")
+    if not setup_id:
+        block_reasons.append("SETUP_ID_MISSING")
+    if not signal_id:
+        block_reasons.append("SIGNAL_ID_MISSING")
+    if not plan_id:
+        block_reasons.append("PLAN_ID_MISSING")
 
     if block_reasons:
         decision = "BLOCK"
@@ -182,14 +202,28 @@ def build_contract_decision_gate(
     reason_codes.extend(downgrade_reasons)
     reason_codes.append(f"DECISION_{decision}")
 
+    execution_permission = "ALLOW_OPEN"
+    if any(reason in HARD_BLOCK_REASONS for reason in (block_reasons + downgrade_reasons + reason_codes)):
+        execution_permission = "BLOCK_OPEN"
+    elif decision != "ALLOW_PAPER":
+        execution_permission = "METADATA_ONLY_NO_OPEN"
+    decision_id = stable_id("DEC", symbol, setup_id, signal_id, plan_id, _utc_now())
+
     return {
         "timestamp_utc": _utc_now(),
         "block_id": BLOCK_ID,
+        "record_type": "decision",
+        "decision_id": decision_id,
+        "parent_id": plan_id or signal_id or setup_id or None,
+        "setup_id": setup_id or None,
+        "signal_id": signal_id or None,
+        "plan_id": plan_id or None,
         "symbol": str(trade_plan.get("symbol") or symbol),
         "source": {"source_mode": "STATE_FILE"},
         "mode": MODE,
         "data_quality": dq,
         "decision_status": decision,
+        "execution_permission": execution_permission,
         "direction": direction if direction in {"LONG", "SHORT", "NEUTRAL"} else "NEUTRAL",
         "contract_id": trade_plan.get("contract_id"),
         "setup_family": trade_plan.get("setup_family"),
@@ -255,5 +289,24 @@ def run_contract_decision_gate(symbol: str = "BTCUSDT", fake_sample: bool = Fals
     payload["loop_id"] = context.get("loop_id")
     write_json(OUTPUT_PATH, payload)
     _append_jsonl(HISTORY_PATH, payload)
+    if payload.get("decision_id"):
+        append_event(
+            "decision_events.jsonl",
+            lineage_record(
+                record_type="decision_event",
+                event_id=str(payload.get("decision_id")),
+                parent_id=str(payload.get("plan_id") or ""),
+                setup_id=str(payload.get("setup_id") or ""),
+                signal_id=str(payload.get("signal_id") or ""),
+                plan_id=str(payload.get("plan_id") or ""),
+                decision_id=str(payload.get("decision_id") or ""),
+                context_id=context.get("context_id"),
+                loop_id=context.get("loop_id"),
+                reason_codes=list(payload.get("reason_codes") or []),
+                blocked_by=list(payload.get("block_reasons") or []) + list(payload.get("downgrade_reasons") or []),
+                feeds_next=["paper_trade_open_events"],
+                extra={"execution_permission": payload.get("execution_permission"), "decision_status": payload.get("decision_status")},
+            ),
+        )
     return payload
 

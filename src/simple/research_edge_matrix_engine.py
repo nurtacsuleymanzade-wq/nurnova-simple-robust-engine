@@ -12,6 +12,7 @@ BLOCK_ID = "RESEARCH_EDGE_MATRIX_ENGINE"
 OUTPUT_PATH = epoch_state_path("latest_research_edge_matrix.json")
 HISTORY_PATH = epoch_data_path("research_edge_matrix_history.jsonl")
 LIFECYCLE_HISTORY_PATH = epoch_data_path("research_paper_lifecycle_history.jsonl")
+OUTCOME_EVENTS_PATH = epoch_data_path("outcome_events.jsonl")
 ACCOUNTING_PATH = epoch_state_path("latest_outcome_accounting.json")
 MAX_HISTORY_ROWS = 5000
 
@@ -29,11 +30,10 @@ GROUP_FIELDS = (
 
 def _closed_records() -> dict[str, dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {}
-    for payload in read_jsonl_tail_objects(LIFECYCLE_HISTORY_PATH, max_lines=MAX_HISTORY_ROWS):
-        for trade in payload.get("trades_closed_this_loop") or []:
-            trade_id = str(trade.get("paper_trade_id") or "")
-            if trade_id:
-                records[trade_id] = dict(trade)
+    for payload in read_jsonl_tail_objects(OUTCOME_EVENTS_PATH, max_lines=MAX_HISTORY_ROWS):
+        trade_id = str(payload.get("paper_trade_id") or "")
+        if trade_id:
+            records[trade_id] = dict(payload)
     return records
 
 
@@ -41,12 +41,11 @@ def _clean_sample(trade: dict[str, Any]) -> bool:
     required = tuple(field for field in GROUP_FIELDS if field not in {"signal_grade", "event_confluence_count"})
     return (
         str(trade.get("epoch_id") or "") == ACTIVE_EPOCH_ID
-        and str(trade.get("outcome_status") or "").upper() == "CLOSED"
-        and trade.get("valid_for_edge") is not False
+        and str(trade.get("outcome_status") or "").upper() in {"TP1_HIT", "TP2_HIT", "SL_HIT", "EXPIRED"}
         and all(trade.get(field) not in (None, "") for field in required)
         and safe_float(trade.get("rr1")) is not None
         and safe_float(trade.get("rr2")) is not None
-        and safe_float(trade.get("r_result")) is not None
+        and safe_float(trade.get("mfe")) is not None
     )
 
 
@@ -155,7 +154,7 @@ def run_research_edge_matrix_engine() -> dict[str, Any]:
                 "missing_inputs": [
                     name for name, ok in {
                         "epoch_v2/latest_outcome_accounting.json": bool(accounting),
-                        "epoch_v2/research_paper_lifecycle_history.jsonl": LIFECYCLE_HISTORY_PATH.exists(),
+                        "epoch_v2/outcome_events.jsonl": OUTCOME_EVENTS_PATH.exists(),
                     }.items() if not ok
                 ],
             },
