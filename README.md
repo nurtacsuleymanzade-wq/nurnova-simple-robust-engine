@@ -2,6 +2,96 @@
 
 Standalone paper-only file-based MVP trading intelligence system.
 
+## PHASE 6 — Trade Plan & Decision Gate
+
+Produces a real-evidence-based trade plan and a decision gate verdict from PHASE 5 Setup Candidate + Entry Trigger output.
+
+Answers:
+- Is there a valid entry with structural stop and liquidity destination?
+- What is the entry model (RETEST / BREAKOUT / RECLAIM / REJECTION / CONTINUATION)?
+- What are the exact entry, SL, TP1, TP2, and invalidation levels?
+- What is the RR to each target (computed from price levels, never from fixed templates)?
+- Should a paper trade be allowed, waited on, or blocked?
+
+Rules enforced:
+- TP only from liquidity destination (nearest_liquidity_above/below, range high/low). Fixed-RR TP is forbidden.
+- SL only from logical structural invalidation (structural low/high, sweep level, absorption level).
+- `real_trade_allowed` is always `false`. No private API. No real orders.
+- ALLOW_PAPER only when entry, SL, TP1, invalidation and RR are all valid.
+- Template risk score detects degenerate / formulaic outputs and triggers BLOCK.
+
+Run:
+```
+python -m src.trade_decision.run_trade_decision_engine
+```
+
+Outputs:
+- `state/trade_decision/latest_trade_decision.json`
+- `state/trade_decision/trade_decision_engine_state.json`
+- `data/live/trade_decision_events.jsonl`
+- `reports/trade_decision/trade_decision_latest_report.md`
+
+Key fields: `decision_status`, `side`, `entry_model`, `entry_price`, `stop_loss`, `take_profit_1`, `rr_to_tp1`, `plan_quality`, `risk_grade`, `decision_confidence`.
+Feeds next: PHASE_7_PAPER_LIFECYCLE_OUTCOME_TRUTH, PHASE_8_CONDITIONAL_EDGE_MATRIX, PHASE_10_NOVA_BRAIN_SNAPSHOT.
+No real trade permissions emitted. Paper only.
+
+---
+
+## PHASE 4 — Flow Confirmation & Post-Liquidity Reaction
+
+Context-only engine that measures real price reaction after a liquidity event (sweep/trap/absorption).
+
+Answers:
+- Was liquidity taken?
+- Continuation, reversal, rejection or reclaim after sweep?
+- Absorption detected?
+- Buyers/sellers trapped?
+- Real breakout or failed breakout?
+- Does flow confirm the active scenario?
+
+Run:
+```
+python -m src.flow_reaction.run_flow_reaction_engine
+```
+
+Outputs:
+- `state/flow_reaction/latest_flow_reaction.json`
+- `state/flow_reaction/flow_reaction_engine_state.json`
+- `data/live/flow_reaction_events.jsonl`
+- `reports/flow_reaction/flow_reaction_latest_report.md`
+
+Key fields: `flow_confirmation`, `post_liquidity_reaction`, `absorption_state`, `trap_state`, `reaction_bias`, `reaction_confidence`.
+Feeds next: PHASE_5, PHASE_8, PHASE_10.
+No entry/SL/TP/trade permissions emitted.
+
+## PHASE 5 — Setup Candidate & Entry Trigger
+
+Context-only engine that classifies setup candidates and entry trigger eligibility.
+
+Produces:
+- 12 setup candidate types (continuation, reversal, range, compression, trap, reclaim, rejection)
+- Setup direction (LONG/SHORT/NEUTRAL/NO_TRADE)
+- Setup quality (A/B/C)
+- Setup confidence (0.0–1.0)
+- 6 entry trigger statuses (READY/NEAR/WAIT/INVALID/CONFLICTED/UNKNOWN)
+- Entry trigger quality (HIGH/MEDIUM/LOW)
+- Entry trigger confidence (0.0–1.0)
+
+Run:
+```
+python -m src.setup_entry.run_setup_entry_engine
+```
+
+Outputs:
+- `state/setup_entry/latest_setup_entry.json`
+- `state/setup_entry/setup_entry_engine_state.json`
+- `data/live/setup_entry_events.jsonl`
+- `reports/setup_entry/setup_entry_latest_report.md`
+
+Uses inputs: Market State + Active Scenario + Flow Reaction + Liquidity/Structure/Candle context.
+Feeds next: PHASE_6 (Trade Plan), PHASE_8, PHASE_10.
+No entry prices, SL/TP, trade plan, or trade permissions emitted.
+
 ## S29 - Setup Classifier V2
 
 Read-only setup classifier that combines S13/S14/S15/S16/S22/S26B/S27/S28
@@ -620,3 +710,58 @@ Key fields: `depth_available`, `fallback_used`, `liquidity_memory_status`,
 `bid_wall_state`, `ask_wall_state`, `wall_events`, `liquidity_bias`, `confidence`.
 
 `safe_to_open_real_trade=false` always. Runs as S27 inside S24 observer cycle after S26B.
+
+## PHASE 1 — Causal Lineage Spine
+
+Phase 1 adds an additive lineage audit layer without changing existing trading logic.
+
+Run:
+```bash
+python -m src.lineage.run_lineage_audit
+```
+
+Core modules:
+- `src/lineage/lineage_registry.py`
+- `src/lineage/lineage_builder.py`
+- `src/lineage/lineage_validator.py`
+- `src/lineage/lineage_graph_engine.py`
+- `src/lineage/run_lineage_audit.py`
+
+Outputs:
+- `state/lineage/latest_lineage_audit.json`
+- `state/lineage/lineage_graph_state.json`
+- `data/live/lineage_audit_events.jsonl`
+- `reports/lineage/lineage_audit_latest_report.md`
+
+## PHASE 2 — Market State Engine
+
+Phase 2 adds a context-only market state layer with deterministic `market_state_id`
+and lineage linkage. It does not create entry/SL/TP/trade decisions.
+
+Run:
+```bash
+python -m src.market_state.run_market_state_engine
+```
+
+Outputs:
+- `state/market_state/latest_market_state.json`
+- `state/market_state/market_state_engine_state.json`
+- `data/live/market_state_events.jsonl`
+- `reports/market_state/market_state_latest_report.md`
+
+## PHASE 3 — Active Scenario Engine
+
+Phase 3 adds a context-only active scenario selector on top of market-state and
+liquidity/structure/flow/reaction evidence. It does not create entry, SL/TP, or
+execution decisions.
+
+Run:
+```bash
+python -m src.active_scenario.run_active_scenario_engine
+```
+
+Outputs:
+- `state/active_scenario/latest_active_scenario.json`
+- `state/active_scenario/active_scenario_engine_state.json`
+- `data/live/active_scenario_events.jsonl`
+- `reports/active_scenario/active_scenario_latest_report.md`
