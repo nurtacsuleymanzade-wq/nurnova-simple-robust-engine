@@ -35,6 +35,93 @@ Key fields: `decision_status`, `side`, `entry_model`, `entry_price`, `stop_loss`
 Feeds next: PHASE_7_PAPER_LIFECYCLE_OUTCOME_TRUTH, PHASE_8_CONDITIONAL_EDGE_MATRIX, PHASE_10_NOVA_BRAIN_SNAPSHOT.
 No real trade permissions emitted. Paper only.
 
+## PHASE 7 — Paper Lifecycle & Outcome Truth
+
+Starts a paper-only lifecycle only from PHASE 6 `ALLOW_PAPER` decisions and measures the real fate of the paper trade from price-path evidence.
+
+Rules enforced:
+- No private Binance API.
+- No real order execution.
+- `edge_eligible=true` only for closed non-diagnostic outcomes.
+- `DIAGNOSTIC_TIMEOUT` is stored for diagnostics only and must not feed main edge truth as a win/loss.
+
+Run:
+```
+python -m src.paper_outcome.run_paper_outcome_engine
+```
+
+Outputs:
+- `state/paper_outcome/latest_paper_outcome.json`
+- `state/paper_outcome/paper_outcome_engine_state.json`
+- `data/live/paper_outcome_events.jsonl`
+- `reports/paper_outcome/paper_outcome_latest_report.md`
+
+## PHASE 8 — Conditional Edge Matrix
+
+Builds conditional edge rows only from PHASE 7 closed and edge-eligible paper outcomes. It does not create trades, decisions, or price levels.
+
+Rules enforced:
+- Only eligible closed outcomes feed edge metrics.
+- `TIMEOUT`, `NO_ENTRY_TOUCH`, `UNKNOWN`, open, and non-edge-eligible outcomes are excluded.
+- No private Binance API.
+- No real order execution.
+
+Run:
+```
+python -m src.edge_matrix.run_conditional_edge_matrix
+```
+
+Outputs:
+- `state/edge_matrix/latest_conditional_edge_matrix.json`
+- `state/edge_matrix/edge_matrix_engine_state.json`
+- `data/live/conditional_edge_matrix_events.jsonl`
+- `reports/edge_matrix/conditional_edge_matrix_latest_report.md`
+
+## PHASE 9 — What-If Replay Engine
+
+Replays only real closed edge-eligible paper outcomes and measures counterfactual alternatives such as later entry, wider stop, farther TP, or no-trade.
+
+Rules enforced:
+- Replay never overrides the original PHASE 6 decision.
+- Replay does not change PHASE 7 truth or PHASE 8 edge metrics.
+- `TIMEOUT`, `NO_ENTRY`, and open/non-edge outcomes are excluded from replay input.
+- No private Binance API.
+- No real order execution.
+
+Run:
+```
+python -m src.replay_engine.run_replay_engine
+```
+
+Outputs:
+- `state/replay_engine/latest_replay_engine.json`
+- `state/replay_engine/replay_engine_state.json`
+- `data/live/replay_engine_events.jsonl`
+- `reports/replay_engine/replay_engine_latest_report.md`
+
+## PHASE 10 — Nova Brain Snapshot
+
+Operational intelligence layer that reads the full PHASE 2-9 chain and emits a read-only system snapshot: health, edge growth/decay, risk pressure, replay learning, and dominant market story.
+
+Rules enforced:
+- No trade creation.
+- No Decision Gate override.
+- No Outcome Truth or Edge Matrix mutation.
+- No autonomous trading behavior.
+- No private Binance API.
+- No real order execution.
+
+Run:
+```
+python -m src.nova_brain.run_nova_brain_snapshot
+```
+
+Outputs:
+- `state/nova_brain/latest_nova_brain_snapshot.json`
+- `state/nova_brain/nova_brain_engine_state.json`
+- `data/live/nova_brain_snapshot_events.jsonl`
+- `reports/nova_brain/nova_brain_snapshot_latest_report.md`
+
 ---
 
 ## PHASE 4 — Flow Confirmation & Post-Liquidity Reaction
@@ -765,3 +852,56 @@ Outputs:
 - `state/active_scenario/active_scenario_engine_state.json`
 - `data/live/active_scenario_events.jsonl`
 - `reports/active_scenario/active_scenario_latest_report.md`
+
+## PHASE 11 — Probabilistic Scenario Engine
+
+Phase 11 adds a probabilistic scenario-intelligence layer. It reads upstream
+market/scenario/flow/edge/replay/brain outputs and produces future path
+probabilities, scenario trees, and risk-path maps. It does not place trades,
+override decision gates, or act as a prediction bot.
+
+Run:
+```bash
+python -m src.probabilistic_engine.run_probabilistic_engine
+```
+
+Outputs:
+- `state/probabilistic_engine/latest_probabilistic_engine.json`
+- `state/probabilistic_engine/probabilistic_engine_state.json`
+- `data/live/probabilistic_engine_events.jsonl`
+- `reports/probabilistic_engine/probabilistic_engine_latest_report.md`
+
+## PHASE 12 — Perspective Merger
+
+Phase 12 merges core engine context with optional Smart Money and Market Maker
+perspectives into a single alignment context. It is context-only and does not
+override decision gates, alter Nova Brain outputs, or create trades.
+
+Run:
+```bash
+python -m src.perspective_merger.run_perspective_merger
+```
+
+Outputs:
+- `state/perspective_merger/latest_perspective_merger.json`
+- `state/perspective_merger/perspective_merger_state.json`
+- `data/live/perspective_merger_events.jsonl`
+- `reports/perspective_merger/perspective_merger_latest_report.md`
+
+## PHASE 13 — Autonomous Intelligence Readiness
+
+Phase 13 is a read-only autonomy safety audit. It measures whether the full
+system is ready for any future autonomous-trading escalation by scoring lineage,
+edge stability, replay validation, template risk, hallucination risk, and
+operational controls. It does not trade, override decisions, or start autonomy.
+
+Run:
+```bash
+python -m src.autonomy_audit.run_autonomy_audit
+```
+
+Outputs:
+- `state/autonomy_audit/latest_autonomy_audit.json`
+- `state/autonomy_audit/autonomy_audit_state.json`
+- `data/live/autonomy_audit_events.jsonl`
+- `reports/autonomy_audit/autonomy_audit_latest_report.md`
