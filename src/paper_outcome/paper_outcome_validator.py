@@ -73,6 +73,8 @@ def validate_paper_outcome(payload: dict[str, Any]) -> dict[str, Any]:
     if payload.get("edge_eligible") is True and payload.get("is_closed_outcome") is not True:
         errors.append("EDGE_ELIGIBLE_REQUIRES_CLOSED_OUTCOME")
     if payload.get("edge_eligible") is True and payload.get("trade_fate") in {
+        "NO_ACTIONABLE_DECISION",
+        "NO_OPEN_PAPER_TRADE",
         "NO_ENTRY_TOUCH",
         "EXPIRED_NO_ENTRY",
         "DIAGNOSTIC_TIMEOUT",

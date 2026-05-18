@@ -32,15 +32,20 @@ def test_allow_paper_creates_paper_trade() -> None:
 def test_block_does_not_create_paper_trade() -> None:
     payload = build_paper_lifecycle(_decision("BLOCK"), timestamp_utc="2026-05-18T01:00:00Z")
     assert payload["lifecycle_state"] == "UNKNOWN"
-    assert payload["trade_fate"] == "UNKNOWN"
+    assert payload["trade_fate"] == "NO_ACTIONABLE_DECISION"
     assert "DECISION_STATUS_BLOCK" in payload["reason_codes"]
+    assert "NO_ACTIONABLE_DECISION" in payload["reason_codes"]
+    assert "NO_OPEN_PAPER_TRADE" in payload["reason_codes"]
+    assert payload["edge_eligible"] is False
 
 
 def test_wait_does_not_create_paper_trade() -> None:
     payload = build_paper_lifecycle(_decision("WAIT"), timestamp_utc="2026-05-18T01:00:00Z")
     assert payload["lifecycle_state"] == "UNKNOWN"
-    assert payload["trade_fate"] == "UNKNOWN"
+    assert payload["trade_fate"] == "NO_ACTIONABLE_DECISION"
     assert "DECISION_STATUS_WAIT" in payload["reason_codes"]
+    assert "NO_ACTIONABLE_DECISION" in payload["reason_codes"]
+    assert "NO_OPEN_PAPER_TRADE" in payload["reason_codes"]
 
 
 def test_deterministic_paper_trade_id_stays_stable() -> None:

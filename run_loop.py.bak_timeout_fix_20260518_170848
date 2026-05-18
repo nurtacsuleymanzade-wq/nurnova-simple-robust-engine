@@ -194,7 +194,7 @@ def _scan_windows_run_loops() -> tuple[list[dict], list[str]]:
             ["powershell", "-NoProfile", "-Command", command],
             capture_output=True,
             text=True,
-            timeout=1800,  # patched: allow full local pipeline completion
+            timeout=10,
         )
     except Exception as exc:
         return [], [f"WINDOWS_PROCESS_SCAN_EXCEPTION_{str(exc)[:120]}"]

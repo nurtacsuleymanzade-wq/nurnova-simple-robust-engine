@@ -12,9 +12,7 @@ from src.simple.research_epoch import epoch_data_path, epoch_state_path
 from src.simple.research_runtime import current_runtime_context, load_json, safe_float, stamp_payload
 
 BLOCK_ID = "TP_CONDITION_DNA_ENGINE"
-MAX_TAIL_ROWS = 200          # FIX-TP: 5000→200
-MAX_CONDITIONS_PER_RECORD = 30  # FIX-TP: combinations cap
-MAX_COMB_RECORDS = 100       # FIX-TP: pairs/triples limit
+MAX_TAIL_ROWS = 5000
 INPUTS = {
     "research_lifecycle": epoch_data_path("research_paper_lifecycle_history.jsonl"),
     "outcome_accounting": epoch_data_path("outcome_accounting_history.jsonl"),
@@ -274,13 +272,12 @@ def run_tp_condition_dna_engine(max_tail_rows: int = MAX_TAIL_ROWS) -> dict[str,
     expired_records: list[dict[str, Any]] = []
     for record in merged:
         status = _status(record)
-        conds = _conditions(record)[:MAX_CONDITIONS_PER_RECORD]  # FIX-TP
+        conds = _conditions(record)
         if status == "TP":
             tp_records.append(record)
             tp_conditions.update(conds)
-            if len(tp_records) <= MAX_COMB_RECORDS:  # FIX-TP
-                tp_pairs.update(itertools.combinations(conds, 2))
-                tp_triples.update(itertools.combinations(conds, 3))
+            tp_pairs.update(itertools.combinations(conds, 2))
+            tp_triples.update(itertools.combinations(conds, 3))
         elif status == "SL":
             sl_records.append(record)
             sl_conditions.update(conds)

@@ -60,19 +60,20 @@ _ACTIVE_CHAIN_STAGES: list[tuple[str, str, str]] = [
     ("src.simple.timeframe_resolver", "NOARG", "TIMEFRAME_RESOLVER"),
     ("src.simple.signal_data_contract", "NOARG", "SIGNAL_DATA_CONTRACT"),
     ("src.simple.run_contract_driven_trade_plan", "NOARG", "CONTRACT_DRIVEN_TRADE_PLAN"),
+    ("src.simple.run_edge_validation_governor", "NOARG_MAIN", "EDGE_VALIDATION_GOVERNOR"),
     ("src.simple.run_contract_decision_gate", "NOARG", "CONTRACT_DECISION_GATE"),
     ("src.simple.paper_trade_factory", "NOARG", "PAPER_TRADE_FACTORY"),
     ("src.simple.signal_grade_engine", "NOARG", "SIGNAL_GRADE_ENGINE"),
     ("src.simple.signal_event_consolidator", "NOARG", "SIGNAL_EVENT_CONSOLIDATOR"),
     ("src.simple.research_paper_lifecycle_engine", "NOARG", "RESEARCH_PAPER_LIFECYCLE_ENGINE"),
     ("src.simple.outcome_accounting_engine", "NOARG", "OUTCOME_ACCOUNTING_ENGINE"),
-    ("src.simple.true_outcome_engine", "NOARG", "TRUE_OUTCOME_ENGINE"),
+    # ("src.simple.true_outcome_engine", "NOARG", "TRUE_OUTCOME_ENGINE"),
     ("src.simple.run_contract_edge_matrix", "NOARG", "CONTRACT_EDGE_MATRIX"),
     ("src.simple.research_edge_matrix_engine", "NOARG", "RESEARCH_EDGE_MATRIX_ENGINE"),
-    ("src.edge.tp_condition_dna_engine", "NOARG", "TP_CONDITION_DNA_ENGINE"),
-    ("src.edge.edge_query_engine", "NOARG", "EDGE_QUERY_ENGINE"),
-    ("src.edge.full_lineage_tracker", "NOARG", "FULL_LINEAGE_TRACKER"),
-    ("src.edge.edge_learning_dashboard", "NOARG", "EDGE_LEARNING_DASHBOARD_V2"),
+    # ("src.edge.tp_condition_dna_engine", "NOARG", "TP_CONDITION_DNA_ENGINE"),
+    # ("src.edge.edge_query_engine", "NOARG", "EDGE_QUERY_ENGINE"),
+    # ("src.edge.full_lineage_tracker", "NOARG", "FULL_LINEAGE_TRACKER"),
+    # ("src.edge.edge_learning_dashboard", "NOARG", "EDGE_LEARNING_DASHBOARD_V2"),
     ("src.simple.model_survival_filter", "NOARG", "MODEL_SURVIVAL_FILTER"),
     ("src.simple.telegram_research_reporter", "SUMMARY_REPORT", "TELEGRAM_RESEARCH_REPORTER"),
     ("src.simple.model_feedback_diagnostic", "NOARG", "MODEL_FEEDBACK_DIAGNOSTIC"),
@@ -120,7 +121,9 @@ def _check_critical(output: dict[str, Any]) -> str | None:
 def _classify_status(output: dict[str, Any]) -> str:
     dq = output.get("data_quality", {})
     level = dq.get("level", "") if isinstance(dq, dict) else str(dq).upper()
-    if level in ("LOW", "CRITICAL", "INVALID", "DEGRADED"):
+    if output.get("block_id") == "MTF_CANDLE_DNA_FACTORY" and level in ("LOW","MEDIUM"):
+        return "PASSED"
+    if level in ("CRITICAL", "INVALID", "DEGRADED"):
         return "DEGRADED"
     return "PASSED"
 

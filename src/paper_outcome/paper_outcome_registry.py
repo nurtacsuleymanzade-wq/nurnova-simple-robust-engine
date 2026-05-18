@@ -19,6 +19,8 @@ LIFECYCLE_STATES = (
 )
 
 TRADE_FATES = (
+    "NO_ACTIONABLE_DECISION",
+    "NO_OPEN_PAPER_TRADE",
     "NO_ENTRY_TOUCH",
     "ENTRY_FILLED",
     "TP1_HIT",
@@ -62,6 +64,8 @@ CLOSED_EDGE_ELIGIBLE_FATES = {
 }
 
 NON_EDGE_FATES = {
+    "NO_ACTIONABLE_DECISION",
+    "NO_OPEN_PAPER_TRADE",
     "NO_ENTRY_TOUCH",
     "EXPIRED_NO_ENTRY",
     "DIAGNOSTIC_TIMEOUT",
@@ -171,4 +175,3 @@ def build_outcome_id(
 def build_lineage_id(label: str, *parts: Any) -> str:
     basis = {"label": label, "parts": [str(part or "") for part in parts]}
     return f"LIN_{stable_sha256(basis)[:24]}"
-

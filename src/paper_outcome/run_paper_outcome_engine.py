@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,9 @@ SETUP_ENTRY_PATH = ROOT / "state/setup_entry/latest_setup_entry.json"
 ACTIVE_SCENARIO_PATH = ROOT / "state/active_scenario/latest_active_scenario.json"
 MARKET_STATE_PATH = ROOT / "state/market_state/latest_market_state.json"
 FLOW_REACTION_PATH = ROOT / "state/flow_reaction/latest_flow_reaction.json"
+NON_ACTIONABLE_DECISION_STATUSES = {"NO_TRADE", "BLOCK", "WAIT"}
+MAX_JSONL_FILES_PER_BASE = 12
+MAX_TOTAL_PRICE_RECORDS = 1200
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -46,11 +50,14 @@ def _read_jsonl(path: Path, max_lines: int = 250) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     try:
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        tail: deque[str] = deque(maxlen=max_lines)
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                tail.append(line)
     except Exception:
         return []
     items: list[dict[str, Any]] = []
-    for line in lines[-max_lines:]:
+    for line in tail:
         text = line.strip()
         if not text:
             continue
@@ -73,7 +80,8 @@ def _collect_price_path_records(symbol: str) -> tuple[list[dict[str, Any]], list
     ):
         if not base.exists():
             continue
-        for path in sorted(base.glob(pattern)):
+        paths = sorted(base.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+        for path in paths[:MAX_JSONL_FILES_PER_BASE]:
             items = _read_jsonl(path)
             if not items:
                 continue
@@ -84,6 +92,8 @@ def _collect_price_path_records(symbol: str) -> tuple[list[dict[str, Any]], list
                 item = dict(item)
                 item["source_file"] = str(path.relative_to(ROOT)).replace("\\", "/")
                 records.append(item)
+                if len(records) >= MAX_TOTAL_PRICE_RECORDS:
+                    return records, files_used
 
     state_simple = ROOT / "state/simple"
     if state_simple.exists():
@@ -224,6 +234,7 @@ def run() -> dict[str, Any]:
     timestamp_utc = utc_now()
 
     trade_decision = _read_json(TRADE_DECISION_PATH)
+    decision_status = str((trade_decision or {}).get("decision_status") or "UNKNOWN").upper()
     setup_entry = _read_json(SETUP_ENTRY_PATH)
     active_scenario = _read_json(ACTIVE_SCENARIO_PATH)
     market_state = _read_json(MARKET_STATE_PATH)
@@ -240,9 +251,6 @@ def run() -> dict[str, Any]:
         if not path.exists():
             missing_sources.append(str(path.relative_to(ROOT)).replace("\\", "/"))
 
-    symbol = str((trade_decision or {}).get("symbol") or "BTCUSDT")
-    price_path_records, price_source_files = _collect_price_path_records(symbol)
-
     lifecycle = build_paper_lifecycle(trade_decision, timestamp_utc=timestamp_utc)
     lifecycle["evidence"]["trade_decision_evidence"] = {
         "trade_decision_id": (trade_decision or {}).get("decision_id"),
@@ -257,15 +265,22 @@ def run() -> dict[str, Any]:
         "lineage_id": (trade_decision or {}).get("lineage_id"),
     }
 
-    payload = evaluate_outcome_truth(
-        lifecycle,
-        price_path_records,
-        as_of_timestamp_utc=timestamp_utc,
-    )
+    allow_paper = lifecycle.get("_allow_paper") is True and decision_status not in NON_ACTIONABLE_DECISION_STATUSES
+    symbol = str((trade_decision or {}).get("symbol") or "BTCUSDT")
+    price_path_records: list[dict[str, Any]] = []
+    price_source_files: list[str] = []
+    if allow_paper:
+        price_path_records, price_source_files = _collect_price_path_records(symbol)
+
+    payload = evaluate_outcome_truth(lifecycle, price_path_records, as_of_timestamp_utc=timestamp_utc)
     payload["timestamp_utc"] = timestamp_utc
     payload["block_id"] = PAPER_OUTCOME_BLOCK_ID
     payload["feeds_next"] = list(DEFAULT_FEEDS_NEXT)
-    payload["data_quality"] = _assess_data_quality(trade_decision, price_path_records, missing_sources)
+    payload["data_quality"] = (
+        "ACCEPTABLE"
+        if not allow_paper
+        else _assess_data_quality(trade_decision, price_path_records, missing_sources)
+    )
 
     lineage_id, parent_lineage_ids = _finalize_lineage(payload, trade_decision)
     payload["lineage_id"] = lineage_id

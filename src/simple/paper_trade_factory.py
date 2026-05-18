@@ -953,6 +953,8 @@ def run_paper_trade_factory() -> dict[str, Any]:
             rr_fields = _derive_rr_fields(contract_direction, contract_entry, contract_stop_loss, contract_tp1, contract_tp2)
             opened_ts = utc_now()
             contract_seed = f"{context.get('loop_id')}|{contract_id}|{contract_direction}|{contract_entry}"
+            contract_event_suffix = plan_id or decision_id or opened_ts
+            contract_event_id = f"CONTRACT|{contract_id}|{contract_direction}|{contract_event_suffix}"
             trades.append(
                 {
                     "epoch_id": ACTIVE_EPOCH_ID,
@@ -989,7 +991,7 @@ def run_paper_trade_factory() -> dict[str, Any]:
                     "valid_for_lifecycle": True,
                     "valid_for_edge": True,
                     "invalid_for_edge": False,
-                    "event_id": f"CONTRACT|{contract_id}|{contract_direction}",
+                    "event_id": contract_event_id,
                     "event_bucket_5m": f"CONTRACT|{contract_id}",
                     "event_confluence_count": 1,
                     "cause_chain": [

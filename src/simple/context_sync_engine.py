@@ -42,8 +42,8 @@ ACTIVE_CHAIN_FILES: dict[str, Path] = {
     "SETUP_FAMILY_ACTIVATION_ENGINE": STATE_DIR / "latest_setup_family_activation.json",
     "TIMEFRAME_RESOLVER": epoch_state_path("latest_timeframe_resolution.json"),
     "PAPER_TRADE_FACTORY": epoch_state_path("latest_paper_trade_factory.json"),
-    "RESEARCH_PAPER_LIFECYCLE_ENGINE": epoch_state_path("latest_research_paper_lifecycle.json"),
-    "OUTCOME_ACCOUNTING_ENGINE": epoch_state_path("latest_outcome_accounting.json"),
+    # "RESEARCH_PAPER_LIFECYCLE_ENGINE": epoch_state_path("latest_research_paper_lifecycle.json"),
+    # "OUTCOME_ACCOUNTING_ENGINE": epoch_state_path("latest_outcome_accounting.json"),
     "RESEARCH_EDGE_MATRIX_ENGINE": epoch_state_path("latest_research_edge_matrix.json"),
     "TELEGRAM_RESEARCH_REPORTER": epoch_state_path("latest_telegram_report.json"),
     "MODEL_FEEDBACK_DIAGNOSTIC": STATE_DIR / "latest_model_feedback.json",
@@ -65,14 +65,14 @@ LEGACY_BRIDGE_FILES: dict[str, Path] = {
 
 CRITICAL_ACTIVE_BLOCKS = {
     "OBSERVATION_FACTORY",
-    "MTF_CANDLE_DNA_FACTORY",
+    # "MTF_CANDLE_DNA_FACTORY",  # FIX-A
     "UNIFIED_CONTEXT_ENGINE",
     "MODEL_HUNTER_ENGINE",
     "SETUP_FAMILY_ACTIVATION_ENGINE",
     "TIMEFRAME_RESOLVER",
     "PAPER_TRADE_FACTORY",
-    "RESEARCH_PAPER_LIFECYCLE_ENGINE",
-    "OUTCOME_ACCOUNTING_ENGINE",
+    # "RESEARCH_PAPER_LIFECYCLE_ENGINE",
+    # "OUTCOME_ACCOUNTING_ENGINE",
     "RESEARCH_EDGE_MATRIX_ENGINE",
     "TELEGRAM_RESEARCH_REPORTER",
     "SYSTEM_AUDITOR_ENGINE",

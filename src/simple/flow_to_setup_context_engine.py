@@ -181,6 +181,22 @@ def _setup_context_label(
     ):
         return "STRONG_SHORT_CONTEXT"
 
+    if (
+        evidence_label in ("STRONG_LONG_PRESSURE", "EARLY_LONG_PRESSURE")
+        and persistence_label == "BUILDING_LONG_MOMENTUM"
+        and score >= 3.0
+        and confidence >= 0.50
+    ):
+        return "WEAK_LONG_CONTEXT"
+
+    if (
+        evidence_label in ("STRONG_SHORT_PRESSURE", "EARLY_SHORT_PRESSURE")
+        and persistence_label == "BUILDING_SHORT_MOMENTUM"
+        and score <= -3.0
+        and confidence >= 0.50
+    ):
+        return "WEAK_SHORT_CONTEXT"
+
     if direction_bias == "LONG":
         return "WEAK_LONG_CONTEXT"
 

@@ -54,6 +54,8 @@ def build_paper_lifecycle(
 
     if decision_status != "ALLOW_PAPER":
         reason_codes.append(f"DECISION_STATUS_{decision_status}")
+        reason_codes.append("NO_ACTIONABLE_DECISION")
+        reason_codes.append("NO_OPEN_PAPER_TRADE")
         reason_codes.append("PAPER_TRADE_NOT_STARTED")
         return {
             "timestamp_utc": timestamp_utc,
@@ -66,7 +68,7 @@ def build_paper_lifecycle(
             "entry_trigger_id": decision.get("entry_trigger_id"),
             "side": side if side in ("LONG", "SHORT", "NO_TRADE") else "UNKNOWN",
             "lifecycle_state": "UNKNOWN",
-            "trade_fate": "UNKNOWN",
+            "trade_fate": "NO_ACTIONABLE_DECISION",
             "is_closed_outcome": False,
             "edge_eligible": False,
             "entry_price": entry_price,
@@ -81,7 +83,7 @@ def build_paper_lifecycle(
             "invalidation_touched": False,
             "opened_at": None,
             "closed_at": None,
-            "close_reason": "DECISION_NOT_ALLOW_PAPER",
+            "close_reason": "NO_ACTIONABLE_DECISION",
             "r_multiple": None,
             "outcome_quality": "LOW",
             "evidence": {

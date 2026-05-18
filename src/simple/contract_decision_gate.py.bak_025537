@@ -261,7 +261,7 @@ def build_contract_decision_gate(
         edge_current = (edge_validation or {}).get("current_edge_decision")
     edge_status = str((edge_current or {}).get("edge_status") or "")
     edge_block = bool((edge_current or {}).get("edge_block"))
-    if edge_status in {"EDGE_REJECTED", "EDGE_DISABLED"} or edge_block:  # WATCHLIST/PROBATION trade açabilir - veri biriksin
+    if edge_status in {"EDGE_REJECTED", "EDGE_DISABLED", "EDGE_WATCHLIST", "EDGE_PROBATION"} or edge_block:
         paper_permission = False
         paper_decision = "BLOCK"
         downgrade_reasons.append(f"EDGE_VALIDATION_{edge_status or 'BLOCK'}")
