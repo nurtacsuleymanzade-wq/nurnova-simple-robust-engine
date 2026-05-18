@@ -8,6 +8,7 @@ from typing import Any
 from src.simple.research_runtime import current_runtime_context, write_json
 from src.simple.setup_contract_registry import load_setup_contract_registry
 from src.simple.lineage_event_logger import append_event, lineage_record, stable_id
+from src.simple.research_epoch import epoch_state_path
 
 BLOCK_ID = "CONTRACT_DRIVEN_TRADE_PLAN"
 STATE_DIR = Path("state/simple")
@@ -20,7 +21,7 @@ LIQUIDITY_PATH = STATE_DIR / "latest_liquidity_structure.json"
 SETUP_CANDIDATE_PATH = STATE_DIR / "latest_setup_candidate.json"
 DEPTH_MEMORY_PATH = STATE_DIR / "latest_depth_memory.json"
 VOLUME_PROFILE_PATH = STATE_DIR / "latest_volume_profile.json"
-SIGNAL_EVENT_PATH = STATE_DIR / "latest_signal_event.json"
+SIGNAL_EVENT_PATH = epoch_state_path("latest_signal_event.json")
 
 OUTPUT_PATH = STATE_DIR / "latest_contract_trade_plan.json"
 HISTORY_PATH = DATA_DIR / "contract_trade_plan_history.jsonl"

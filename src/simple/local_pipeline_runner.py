@@ -98,7 +98,7 @@ _LEGACY_BRIDGE_STAGES: list[tuple[str, str, str]] = [
     ("src.simple.simple_brain_report_engine", "run_fake_sample", "S10_SIMPLE_BRAIN_REPORT"),
 ]
 
-_STAGES = list(_ACTIVE_CHAIN_STAGES)
+_STAGES = list(_ACTIVE_CHAIN_STAGES) + list(_LEGACY_BRIDGE_STAGES)
 
 
 def _utc_now() -> str:

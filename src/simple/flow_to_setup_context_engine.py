@@ -21,7 +21,15 @@ S15_STATE_PATH = STATE_DIR / "s15_setup_context_state.json"
 SETUP_CONTEXT_LOG_PATH = DATA_DIR / "setup_context_history.jsonl"
 REPORT_PATH = REPORTS_DIR / "s15_setup_context_latest_report.md"
 
-_CONT_WEIGHTS = {"STRONG": 1.0, "MODERATE": 0.75, "WEAK": 0.50, "NONE": 0.25}
+_CONT_WEIGHTS = {
+    "STRONG": 1.0,
+    "SUSTAINED": 1.0,
+    "BUILDING": 0.85,
+    "MODERATE": 0.75,
+    "FADING": 0.40,
+    "WEAK": 0.50,
+    "NONE": 0.25,
+}
 
 
 def _now_utc() -> str:
@@ -159,7 +167,7 @@ def _setup_context_label(
 
     if (
         evidence_label == "STRONG_LONG_PRESSURE"
-        and persistence_label == "SUSTAINED_LONG_PRESSURE"
+        and persistence_label in ("SUSTAINED_LONG_PRESSURE", "BUILDING_LONG_MOMENTUM")
         and score >= 5.0
         and confidence >= 0.60
     ):
@@ -167,7 +175,7 @@ def _setup_context_label(
 
     if (
         evidence_label == "STRONG_SHORT_PRESSURE"
-        and persistence_label == "SUSTAINED_SHORT_PRESSURE"
+        and persistence_label in ("SUSTAINED_SHORT_PRESSURE", "BUILDING_SHORT_MOMENTUM")
         and score <= -5.0
         and confidence >= 0.60
     ):
