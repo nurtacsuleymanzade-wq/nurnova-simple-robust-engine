@@ -118,9 +118,9 @@ def test_reason_codes_not_empty():
     assert all(isinstance(c, str) for c in sc["reason_codes"])
 
 
-def test_feeds_next_includes_s7():
+def test_feeds_next_includes_signal():
     sc = run_fake_sample("BTCUSDT")
-    assert "S7_TRADE_PLAN_DECISION_GATE" in sc["feeds_next"]["next_blocks"]
+    assert "SIGNAL_EVENT_CONSOLIDATOR" in sc["feeds_next"]["next_blocks"]
 
 
 def test_no_forbidden_decision_or_edge_fields_top_level():
@@ -152,7 +152,7 @@ def test_missing_s5_yields_no_setup_or_watch_no_crash():
     assert sc["setup_candidate"]["setup_status"] in ("NO_SETUP", "WATCH_SETUP")
     assert sc["scenario"]["scenario_type"] in ("NO_CLEAR_SCENARIO", "UNKNOWN")
     assert sc["reason_codes"]
-    assert "S7_TRADE_PLAN_DECISION_GATE" in sc["feeds_next"]["next_blocks"]
+    assert "SIGNAL_EVENT_CONSOLIDATOR" in sc["feeds_next"]["next_blocks"]
 
 
 def test_missing_s1_yields_invalid():
@@ -253,6 +253,6 @@ def test_runner_creates_all_output_files(monkeypatch):
         )
         assert data["block_id"] == "S6_SCENARIO_SETUP_CANDIDATE"
         assert data["reason_codes"]
-        assert "S7_TRADE_PLAN_DECISION_GATE" in data["feeds_next"]["next_blocks"]
+        assert "SIGNAL_EVENT_CONSOLIDATOR" in data["feeds_next"]["next_blocks"]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

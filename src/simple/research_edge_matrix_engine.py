@@ -41,6 +41,7 @@ def _clean_sample(trade: dict[str, Any]) -> bool:
     required = tuple(field for field in GROUP_FIELDS if field not in {"signal_grade", "event_confluence_count"})
     return (
         str(trade.get("epoch_id") or "") == ACTIVE_EPOCH_ID
+        and bool(trade.get("closed_only", True))
         and str(trade.get("outcome_status") or "").upper() in {"TP1_HIT", "TP2_HIT", "SL_HIT", "EXPIRED"}
         and all(trade.get(field) not in (None, "") for field in required)
         and safe_float(trade.get("rr1")) is not None
@@ -165,7 +166,9 @@ def run_research_edge_matrix_engine() -> dict[str, Any]:
                 "PAPER_ONLY",
                 "NO_LIVE_EXECUTION",
                 "NO_PRIVATE_API",
+                "SOURCE_CLOSED_OUTCOMES_ONLY",
             ],
+            "source": "closed_outcomes_only",
             "feeds_next": ["TELEGRAM_RESEARCH_REPORTER"],
             "execution_safety": {
                 "safe_to_open_real_trade": False,

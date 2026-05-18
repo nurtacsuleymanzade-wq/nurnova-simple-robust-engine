@@ -5,6 +5,7 @@ no Telegram, no real trade execution.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -88,6 +89,165 @@ def _safe_float(v: Any) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _canonical_json(payload: Any) -> str:
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def _stable_sha256(payload: Any) -> str:
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _is_timeout_like(record: dict[str, Any]) -> bool:
+    tokens = {
+        str(record.get("outcome_status") or "").upper(),
+        str(record.get("status") or "").upper(),
+        str(record.get("outcome_result") or "").upper(),
+        str(record.get("result") or "").upper(),
+        str(record.get("close_reason") or "").upper(),
+        str(record.get("fate") or "").upper(),
+    }
+    return any("TIMEOUT" in token for token in tokens if token)
+
+
+def _is_closed_outcome_record(record: dict[str, Any]) -> bool:
+    if _is_timeout_like(record):
+        return False
+    status_tokens = {
+        str(record.get("outcome_status") or "").upper(),
+        str(record.get("status") or "").upper(),
+        str(record.get("fate") or "").upper(),
+    }
+    result_tokens = {
+        str(record.get("outcome_result") or "").upper(),
+        str(record.get("result") or "").upper(),
+        str(record.get("close_reason") or "").upper(),
+    }
+    closed_status = {
+        "CLOSED",
+        "WIN",
+        "LOSS",
+        "TP",
+        "SL",
+        "PARTIAL_WIN",
+        "PARTIAL_LOSS",
+        "TP1_HIT",
+        "TP2_HIT",
+        "SL_HIT",
+    }
+    closed_result = {
+        "TP1",
+        "TP2",
+        "SL",
+        "WIN",
+        "LOSS",
+        "PARTIAL_WIN",
+        "PARTIAL_LOSS",
+        "TP1_HIT",
+        "TP2_HIT",
+        "SL_HIT",
+    }
+    disallowed = {
+        "OPEN",
+        "ACTIVE",
+        "PENDING",
+        "WAIT",
+        "NO_ENTRY",
+        "INVALID",
+        "NO_OUTCOME",
+        "STILL_OPEN",
+        "NO_LIFECYCLE",
+    }
+    if any(token in disallowed for token in status_tokens.union(result_tokens)):
+        return False
+    return bool(status_tokens.intersection(closed_status) or result_tokens.intersection(closed_result))
+
+
+def _source_field(record: dict[str, Any], key: str) -> Any:
+    if record.get(key) not in (None, ""):
+        return record.get(key)
+    identity = record.get("identity")
+    if isinstance(identity, dict) and identity.get(key) not in (None, ""):
+        return identity.get(key)
+    lineage = record.get("lineage")
+    if isinstance(lineage, dict) and lineage.get(key) not in (None, ""):
+        return lineage.get(key)
+    return None
+
+
+def _deterministic_source_outcome_id(record: dict[str, Any]) -> str:
+    if record.get("outcome_id") not in (None, ""):
+        return str(record.get("outcome_id"))
+    symbol = str(record.get("symbol") or "UNKNOWN")
+    ts = str(record.get("timestamp_utc") or "1970-01-01T00:00:00Z")
+    paper_trade_id = str(_source_field(record, "paper_trade_id") or "")
+    decision_id = str(_source_field(record, "decision_id") or "")
+    setup_id = str(_source_field(record, "setup_candidate_id") or _source_field(record, "setup_id") or "")
+    basis = {
+        "symbol": symbol,
+        "timestamp_utc": ts,
+        "paper_trade_id": paper_trade_id,
+        "decision_id": decision_id,
+        "setup_id": setup_id,
+        "payload_hash": _stable_sha256(record),
+    }
+    return f"OUT_{_stable_sha256(basis)[:24].upper()}"
+
+
+def _deterministic_outcome_lineage_id(record: dict[str, Any], source_outcome_id: str) -> str:
+    existing = record.get("outcome_lineage_id")
+    if existing not in (None, ""):
+        return str(existing)
+    lineage = record.get("lineage")
+    if isinstance(lineage, dict):
+        if lineage.get("lineage_id") not in (None, ""):
+            return str(lineage.get("lineage_id"))
+        if lineage.get("outcome_lineage_id") not in (None, ""):
+            return str(lineage.get("outcome_lineage_id"))
+    basis = {
+        "symbol": str(record.get("symbol") or "UNKNOWN"),
+        "timestamp_utc": str(record.get("timestamp_utc") or "1970-01-01T00:00:00Z"),
+        "source_outcome_id": source_outcome_id,
+        "payload_hash": _stable_sha256(record),
+    }
+    return f"LIN_{_stable_sha256(basis)[:24].upper()}"
+
+
+def _closed_outcome_sources(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for rec in records:
+        if not _is_closed_outcome_record(rec):
+            continue
+        source_outcome_id = _deterministic_source_outcome_id(rec)
+        parent_outcome_id = str(
+            rec.get("parent_outcome_id")
+            or rec.get("outcome_id")
+            or rec.get("lifecycle_id")
+            or source_outcome_id
+        )
+        source_paper_trade_id = str(_source_field(rec, "paper_trade_id") or _source_field(rec, "trade_id") or "")
+        source_decision_id = str(_source_field(rec, "decision_id") or "")
+        source_setup_candidate_id = str(_source_field(rec, "setup_candidate_id") or _source_field(rec, "setup_id") or "")
+        outcome_status = str(rec.get("outcome_status") or rec.get("status") or "CLOSED").upper()
+        outcome_result = str(rec.get("outcome_result") or rec.get("result") or rec.get("close_reason") or "UNKNOWN").upper()
+        outcome_closed_at = str(rec.get("closed_at_utc") or rec.get("timestamp_utc") or "")
+        outcome_lineage_id = _deterministic_outcome_lineage_id(rec, source_outcome_id)
+        out[source_outcome_id] = {
+            "source_outcome_id": source_outcome_id,
+            "parent_outcome_id": parent_outcome_id,
+            "source_paper_trade_id": source_paper_trade_id,
+            "source_decision_id": source_decision_id,
+            "source_setup_candidate_id": source_setup_candidate_id,
+            "outcome_status": outcome_status,
+            "outcome_result": outcome_result,
+            "outcome_closed_at": outcome_closed_at,
+            "outcome_lineage_id": outcome_lineage_id,
+            "edge_source_type": "CLOSED_OUTCOME",
+            "parent_lineage_ids": [outcome_lineage_id],
+            "timestamp_utc": str(rec.get("timestamp_utc") or ""),
+        }
+    return sorted(out.values(), key=lambda item: item.get("timestamp_utc") or "")
 
 
 def load_outcome_records(path: Path) -> list[dict[str, Any]]:
@@ -557,20 +717,49 @@ def run_edge_matrix_v2() -> dict[str, Any]:
 
     latest_outcome = _load_json(LATEST_OUTCOME_PATH)
     history = load_outcome_records(OUTCOME_HISTORY_PATH)
+    closed_outcome_history_path = OUTCOME_HISTORY_PATH.parent / "closed_outcomes_with_lineage.jsonl"
+    closed_history = load_outcome_records(closed_outcome_history_path)
     prior_state = _load_json(S22_STATE_PATH)
 
-    if not history and not latest_outcome:
+    if not history and not latest_outcome and not closed_history:
         input_status = "MISSING"
-    elif not history and latest_outcome:
+    elif not history and not closed_history and latest_outcome:
         input_status = "PARTIAL"
         history = [latest_outcome]
     else:
         input_status = "OK"
 
-    symbol = _resolve_symbol(latest_outcome, history)
+    history_all = list(history)
+    if closed_history:
+        history_all.extend(closed_history)
+    symbol = _resolve_symbol(latest_outcome, history_all)
     source = "S21_OUTCOME_MONITOR"
 
-    result = build_edge_matrix(history, symbol, source, input_status)
+    result = build_edge_matrix(history_all, symbol, source, input_status)
+    closed_sources = _closed_outcome_sources(history_all)
+    closed_source_latest = closed_sources[-1] if closed_sources else None
+    result["closed_outcome_sources_count"] = len(closed_sources)
+    if not closed_sources:
+        result["edge_data_status"] = "NO_EDGE_DATA"
+        if "NO_CLOSED_OUTCOMES_FOR_EDGE" not in result["reason_codes"]:
+            result["reason_codes"].append("NO_CLOSED_OUTCOMES_FOR_EDGE")
+    else:
+        result["edge_data_status"] = "EDGE_DATA_AVAILABLE"
+        result["edge_source_type"] = "CLOSED_OUTCOME"
+        for field in (
+            "source_outcome_id",
+            "parent_outcome_id",
+            "source_paper_trade_id",
+            "source_decision_id",
+            "source_setup_candidate_id",
+            "outcome_status",
+            "outcome_result",
+            "outcome_closed_at",
+            "outcome_lineage_id",
+            "edge_source_type",
+            "parent_lineage_ids",
+        ):
+            result[field] = closed_source_latest.get(field)
 
     _atomic_write(LATEST_MATRIX_PATH, json.dumps(result, indent=2))
 
@@ -580,6 +769,7 @@ def run_edge_matrix_v2() -> dict[str, Any]:
         "last_symbol": symbol,
         "last_sample_status": result["sample_summary"]["sample_status"],
         "last_edge_status": result["edge_quality"]["edge_status"],
+        "last_edge_data_status": result.get("edge_data_status"),
         "last_total_records": result["sample_summary"]["total_records"],
         "last_usable_closed_records": result["sample_summary"]["usable_closed_records"],
         "runs": int(((prior_state or {}).get("runs") or 0)) + 1,
@@ -595,9 +785,25 @@ def run_edge_matrix_v2() -> dict[str, Any]:
         "edge_quality": result["edge_quality"],
         "reason_codes": result["reason_codes"],
         "execution_safety": result["execution_safety"],
+        "edge_data_status": result.get("edge_data_status"),
     }
-    with MATRIX_HISTORY_PATH.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(summary_record) + "\n")
+    if closed_source_latest is not None:
+        for field in (
+            "source_outcome_id",
+            "parent_outcome_id",
+            "source_paper_trade_id",
+            "source_decision_id",
+            "source_setup_candidate_id",
+            "outcome_status",
+            "outcome_result",
+            "outcome_closed_at",
+            "outcome_lineage_id",
+            "edge_source_type",
+            "parent_lineage_ids",
+        ):
+            summary_record[field] = closed_source_latest.get(field)
+        with MATRIX_HISTORY_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(summary_record) + "\n")
 
     _write_report(result)
     return result

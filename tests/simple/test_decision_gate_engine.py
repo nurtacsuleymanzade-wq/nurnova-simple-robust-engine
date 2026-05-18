@@ -26,7 +26,7 @@ def tmp_s18():
 
 def _plan(
     side: str = "LONG",
-    plan_status: str = "PLAN_READY",
+    plan_status: str = "VALID",
     entry: float = 80000.0,
     sl: float | None = None,
     tp1: float | None = None,
@@ -111,7 +111,7 @@ def test_watch_low_rr():
     r = compute_decision_gate(
         _plan("LONG", rr1=0.5, rr2=1.0), _trig(), None, None, None, None
     )
-    assert r["decision"] == "WATCH"
+    assert r["decision"] == "WATCH_ONLY"
     assert r["decision_status"] == "WATCH_ONLY"
     assert "RR_BELOW_THRESHOLD" in r["warning_reasons"]
 
@@ -149,7 +149,7 @@ def test_watch_low_dq():
     r = compute_decision_gate(
         _plan("LONG", dq_level="LOW", dq_score=0.4), _trig(), None, None, None, None
     )
-    assert r["decision"] in ("WATCH", "BLOCK")
+    assert r["decision"] in ("WATCH_ONLY", "BLOCK")
     assert "DATA_QUALITY_LOW" in r["warning_reasons"]
 
 
@@ -238,7 +238,7 @@ def test_trigger_not_ready_watch():
         _plan("LONG"), _trig(ready=False, state="WAIT_FOR_CONFIRMATION"),
         None, None, None, None,
     )
-    assert r["decision"] in ("WATCH", "BLOCK")
+    assert r["decision"] in ("WATCH_ONLY", "BLOCK")
     assert any("TRIGGER_NOT_READY" in w for w in r["warning_reasons"])
 
 
@@ -248,7 +248,7 @@ def test_plan_not_ready_watch():
     r = compute_decision_gate(
         _plan("LONG", plan_status="WATCH_ONLY"), _trig(), None, None, None, None
     )
-    assert r["decision"] == "WATCH"
+    assert r["decision"] == "WATCH_ONLY"
     assert any("PLAN_NOT_READY" in w for w in r["warning_reasons"])
 
 

@@ -23,6 +23,8 @@ def _gate(decision="ALLOW_PAPER", side="LONG", entry=100.0, sl=95.0, tp1=110.0, 
         "block_id": "S18_DECISION_GATE",
         "symbol": "BTCUSDT",
         "decision": decision,
+        "allowed_for_paper_lifecycle": decision == "ALLOW_PAPER",
+        "decision_id": "DEC_TEST_1",
         "selected_side": side,
         "selected_entry": entry,
         "selected_stop_loss": sl,
@@ -34,6 +36,8 @@ def _gate(decision="ALLOW_PAPER", side="LONG", entry=100.0, sl=95.0, tp1=110.0, 
 
 def _plan(side="LONG", entry=100.0, sl=95.0, tp1=110.0, tp2=120.0):
     return {
+        "signal_id": "SIG_TEST_1",
+        "trade_plan_id": "TP_TEST_1",
         "side": side,
         "entry_price": entry,
         "stop_loss": sl,
@@ -80,7 +84,7 @@ def test_no_lifecycle_when_decision_block():
 
 
 def test_no_lifecycle_when_alert_skipped():
-    r = compute_paper_lifecycle(_gate(decision="WATCH"), _plan(), _alert("SKIPPED"), _flow(101.0))
+    r = compute_paper_lifecycle(_gate(decision="WATCH_ONLY"), _plan(), _alert("SKIPPED"), _flow(101.0))
     assert r["lifecycle_status"] == "NO_LIFECYCLE"
 
 

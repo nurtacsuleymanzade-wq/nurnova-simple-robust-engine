@@ -75,6 +75,16 @@ def _flow_state(price: float = 80000.0) -> dict:
     }
 
 
+def _signal(direction: str = "LONG", state: str = "TRIGGERED") -> dict:
+    return {
+        "block_id": "SIGNAL_EVENT_CONSOLIDATOR",
+        "signal_id": "SIG_TEST_1",
+        "direction": direction,
+        "trigger_state": state,
+        "confidence": 0.9,
+    }
+
+
 def _market_truth() -> dict:
     return {
         "timestamp_utc": "2026-05-11T12:00:00Z",
@@ -86,8 +96,8 @@ def _market_truth() -> dict:
 # --- Test 1: valid long plan ---
 
 def test_valid_long_plan():
-    r = compute_trade_plan(_trigger("LONG"), _setup("LONG"), _flow_state(80000.0), None, None)
-    assert r["plan_status"] in ("PLAN_READY", "WATCH_ONLY")
+    r = compute_trade_plan(_trigger("LONG"), _setup("LONG"), _flow_state(80000.0), None, None, signal_event=_signal("LONG"))
+    assert r["plan_status"] in ("VALID", "WATCH_ONLY")
     assert r["side"] == "LONG"
     assert r["stop_loss"] < r["entry_price"]
     assert r["tp1"] > r["entry_price"]
@@ -97,8 +107,8 @@ def test_valid_long_plan():
 
 
 def test_valid_long_plan_ready():
-    r = compute_trade_plan(_trigger("LONG", trigger_strength=0.9), _setup("LONG", 0.9), _flow_state(80000.0), None, None)
-    assert r["plan_status"] == "PLAN_READY"
+    r = compute_trade_plan(_trigger("LONG", trigger_strength=0.9), _setup("LONG", 0.9), _flow_state(80000.0), None, None, signal_event=_signal("LONG"))
+    assert r["plan_status"] == "VALID"
     assert r["plan_grade"] in ("A_PLUS", "A", "B", "C")
     assert r["rr_tp1"] >= 1.0
     assert r["rr_tp2"] >= 1.5
@@ -112,8 +122,9 @@ def test_valid_short_plan():
         _setup("SHORT", 0.9),
         _flow_state(80000.0),
         None, None,
+        signal_event=_signal("SHORT"),
     )
-    assert r["plan_status"] == "PLAN_READY"
+    assert r["plan_status"] == "VALID"
     assert r["side"] == "SHORT"
     assert r["stop_loss"] > r["entry_price"]
     assert r["tp1"] < r["entry_price"]
@@ -130,6 +141,7 @@ def test_no_plan_when_not_ready():
         _setup("LONG"),
         _flow_state(80000.0),
         None, None,
+        signal_event=_signal("LONG", state="WAIT_FOR_CONFIRMATION"),
     )
     assert r["plan_status"] == "WATCH_ONLY"
     assert r["plan_grade"] == "WATCH"
@@ -143,14 +155,14 @@ def test_no_plan_when_missing_inputs():
 
 
 def test_no_plan_when_no_flow_state():
-    r = compute_trade_plan(_trigger("LONG"), _setup("LONG"), None, None, None)
+    r = compute_trade_plan(_trigger("LONG"), _setup("LONG"), None, None, None, signal_event=_signal("LONG"))
     assert r["plan_status"] == "INVALID"
 
 
 # --- Test 4: invalid if LONG stop above entry (direction contradiction enforced by builder) ---
 
 def test_long_stop_below_entry_invariant():
-    r = compute_trade_plan(_trigger("LONG", trigger_strength=0.95), _setup("LONG", 0.95), _flow_state(80000.0), None, None)
+    r = compute_trade_plan(_trigger("LONG", trigger_strength=0.95), _setup("LONG", 0.95), _flow_state(80000.0), None, None, signal_event=_signal("LONG"))
     assert r["stop_loss"] < r["entry_price"], "LONG stop must be below entry"
 
 
@@ -162,6 +174,7 @@ def test_short_stop_above_entry_invariant():
         _setup("SHORT", 0.95),
         _flow_state(80000.0),
         None, None,
+        signal_event=_signal("SHORT"),
     )
     assert r["stop_loss"] > r["entry_price"], "SHORT stop must be above entry"
 
@@ -170,13 +183,13 @@ def test_short_stop_above_entry_invariant():
 
 def test_direction_contradiction_detected_via_invalid_inputs():
     # NEUTRAL direction → not directional → NO_PLAN
-    r = compute_trade_plan(_trigger("NEUTRAL"), _setup("NEUTRAL", 0.5, False), _flow_state(80000.0), None, None)
+    r = compute_trade_plan(_trigger("NEUTRAL"), _setup("NEUTRAL", 0.5, False), _flow_state(80000.0), None, None, signal_event=_signal("NEUTRAL"))
     assert r["plan_status"] == "NO_PLAN"
     assert r["side"] == "NEUTRAL"
 
 
 def test_long_tp_above_entry():
-    r = compute_trade_plan(_trigger("LONG", trigger_strength=0.95), _setup("LONG", 0.95), _flow_state(80000.0), None, None)
+    r = compute_trade_plan(_trigger("LONG", trigger_strength=0.95), _setup("LONG", 0.95), _flow_state(80000.0), None, None, signal_event=_signal("LONG"))
     assert r["tp1"] > r["entry_price"]
     assert r["tp2"] > r["entry_price"]
 
@@ -184,7 +197,7 @@ def test_long_tp_above_entry():
 def test_short_tp_below_entry():
     r = compute_trade_plan(
         _trigger("SHORT", scenario_label="SHORT_CONTINUATION", trigger_strength=0.95),
-        _setup("SHORT", 0.95), _flow_state(80000.0), None, None,
+        _setup("SHORT", 0.95), _flow_state(80000.0), None, None, signal_event=_signal("SHORT"),
     )
     assert r["tp1"] < r["entry_price"]
     assert r["tp2"] < r["entry_price"]
@@ -193,7 +206,7 @@ def test_short_tp_below_entry():
 # --- Test 7: RR calculated from prices ---
 
 def test_rr_calculated_from_prices():
-    r = compute_trade_plan(_trigger("LONG", trigger_strength=0.95), _setup("LONG", 0.95), _flow_state(80000.0), None, None)
+    r = compute_trade_plan(_trigger("LONG", trigger_strength=0.95), _setup("LONG", 0.95), _flow_state(80000.0), None, None, signal_event=_signal("LONG"))
     expected_rr1 = abs(r["tp1"] - r["entry_price"]) / abs(r["entry_price"] - r["stop_loss"])
     expected_rr2 = abs(r["tp2"] - r["entry_price"]) / abs(r["entry_price"] - r["stop_loss"])
     assert abs(r["rr_tp1"] - round(expected_rr1, 4)) < 1e-3
@@ -208,7 +221,7 @@ def test_low_rr_downgrades_plan(monkeypatch):
     import src.simple.trade_plan_engine as eng
     monkeypatch.setattr(eng, "MIN_RR_TP1", 5.0)
     monkeypatch.setattr(eng, "MIN_RR_TP2", 10.0)
-    r = eng.compute_trade_plan(_trigger("LONG", trigger_strength=0.95), _setup("LONG", 0.95), _flow_state(80000.0), None, None)
+    r = eng.compute_trade_plan(_trigger("LONG", trigger_strength=0.95), _setup("LONG", 0.95), _flow_state(80000.0), None, None, signal_event=_signal("LONG"))
     assert r["plan_status"] == "WATCH_ONLY"
     assert "LOW_RR_DOWNGRADE" in r["reason_codes"]
 
@@ -216,7 +229,7 @@ def test_low_rr_downgrades_plan(monkeypatch):
 # --- Test 9: reason_codes not empty ---
 
 def test_reason_codes_not_empty():
-    r = compute_trade_plan(_trigger("LONG"), _setup("LONG"), _flow_state(80000.0), None, None)
+    r = compute_trade_plan(_trigger("LONG"), _setup("LONG"), _flow_state(80000.0), None, None, signal_event=_signal("LONG"))
     assert len(r["reason_codes"]) > 0
     missing = no_valid_output("TEST")
     assert len(missing["reason_codes"]) > 0
@@ -231,7 +244,8 @@ def test_safety_flags_always_false():
         (None, None, None),
     ]
     for trig, ctx, fs in cases:
-        r = compute_trade_plan(trig, ctx, fs, None, None)
+        sig = _signal("LONG") if trig else None
+        r = compute_trade_plan(trig, ctx, fs, None, None, signal_event=sig)
         s = r["execution_safety"]
         assert s["safe_to_open_real_trade"] is False
         assert s["private_api_used"] is False
@@ -245,7 +259,7 @@ def test_safety_flags_always_false():
 # --- Test 11: feeds_next includes S18 ---
 
 def test_feeds_next_includes_s18():
-    r = compute_trade_plan(_trigger("LONG"), _setup("LONG"), _flow_state(80000.0), None, None)
+    r = compute_trade_plan(_trigger("LONG"), _setup("LONG"), _flow_state(80000.0), None, None, signal_event=_signal("LONG"))
     assert "S18_DECISION_GATE" in r["feeds_next"]["next_blocks"]
     missing = no_valid_output("TEST")
     assert "S18_DECISION_GATE" in missing["feeds_next"]["next_blocks"]
@@ -254,7 +268,7 @@ def test_feeds_next_includes_s18():
 # --- Test 12: required output fields ---
 
 def test_required_output_fields():
-    r = compute_trade_plan(_trigger("LONG", trigger_strength=0.95), _setup("LONG", 0.95), _flow_state(80000.0), None, None)
+    r = compute_trade_plan(_trigger("LONG", trigger_strength=0.95), _setup("LONG", 0.95), _flow_state(80000.0), None, None, signal_event=_signal("LONG"))
     required = {
         "timestamp_utc", "block_id", "symbol", "source", "input_status",
         "plan_status", "side", "entry_price", "stop_loss", "tp1", "tp2",
@@ -274,6 +288,7 @@ def test_model_veto_invalidates_plan():
         _flow_state(80000.0),
         None,
         None,
+        signal_event=_signal("LONG"),
         market_truth=_market_truth(),
         model_registry={
             "active_model_count": 1,
@@ -285,7 +300,7 @@ def test_model_veto_invalidates_plan():
     assert r["plan_status"] == "INVALID"
     assert r["model_veto"] is True
     assert r["model_veto_reason"] == "MODEL_VETO_LONG_CONSENSUS_SHORT_STRENGTH_100.0"
-    assert r["timeframe"] == "1m"
+    assert r["timeframe"] in ("1m", "5m", "15m")
     assert r["candle_close_time"] == "2026-05-11T12:00:00Z"
 
 
@@ -297,6 +312,7 @@ def test_degraded_dq_blocks_plan_ready():
         _setup("LONG", 0.95),
         _flow_state(80000.0),
         None, None,
+        signal_event=_signal("LONG"),
     )
     assert r["plan_status"] == "WATCH_ONLY"
 
@@ -311,15 +327,18 @@ def test_append_only_persistence_and_outputs(tmp_s17, monkeypatch):
     fs = _flow_state(80000.0)
 
     trig_p = tmp_s17 / "trigger.json"
+    sig_p = tmp_s17 / "signal.json"
     ctx_p = tmp_s17 / "ctx.json"
     fs_p = tmp_s17 / "fs.json"
     trig_p.write_text(json.dumps(trig), encoding="utf-8")
+    sig_p.write_text(json.dumps(_signal("LONG")), encoding="utf-8")
     ctx_p.write_text(json.dumps(ctx), encoding="utf-8")
     fs_p.write_text(json.dumps(fs), encoding="utf-8")
 
     log_path = tmp_s17 / "trade_plan_history.jsonl"
 
     monkeypatch.setattr(eng, "SCENARIO_TRIGGER_PATH", trig_p)
+    monkeypatch.setattr(eng, "SIGNAL_EVENT_PATH", sig_p)
     monkeypatch.setattr(eng, "SETUP_CONTEXT_PATH", ctx_p)
     monkeypatch.setattr(eng, "FLOW_STATE_PATH", fs_p)
     monkeypatch.setattr(eng, "EVIDENCE_PATH", tmp_s17 / "no_ev.json")

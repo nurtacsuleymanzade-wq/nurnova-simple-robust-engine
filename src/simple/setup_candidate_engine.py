@@ -8,7 +8,7 @@ from typing import Any
 from src.simple.lineage_event_logger import stable_id
 
 BLOCK_ID = "S6_SCENARIO_SETUP_CANDIDATE"
-FEEDS_NEXT = {"next_blocks": ["S7_TRADE_PLAN_DECISION_GATE"]}
+FEEDS_NEXT = {"next_blocks": ["SIGNAL_EVENT_CONSOLIDATOR"]}
 
 _FAKE_S1: dict[str, Any] = {
     "available": True,
@@ -325,7 +325,15 @@ def _calc_setup_candidate(
         status = "WATCH_SETUP"
         setup_direction = direction
 
+    setup_family = setup_type if status != "NO_SETUP" else "NO_SETUP"
     return {
+        "setup_family": setup_family,
+        "setup_context": scenario.get("scenario_label", "UNKNOWN"),
+        "required_conditions": [
+            f"alignment={scenario.get('scenario_type', 'UNKNOWN')}",
+            f"quality_weight>={quality_weight:.2f}",
+        ],
+        "invalidation_context": scenario.get("scenario_reason", "UNKNOWN"),
         "setup_type": setup_type if status != "NO_SETUP" else "NO_SETUP",
         "setup_direction": setup_direction,
         "raw_setup_score": round(raw_score, 2),

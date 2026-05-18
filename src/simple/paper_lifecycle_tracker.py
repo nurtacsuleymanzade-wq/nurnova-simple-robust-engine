@@ -84,11 +84,9 @@ def _extract_current_price(flow_state: dict[str, Any] | None) -> float | None:
 
 
 def _allowed_for_lifecycle(decision_gate: dict[str, Any] | None, alert: dict[str, Any] | None) -> bool:
-    if not decision_gate or not alert:
+    if not decision_gate:
         return False
-    decision = decision_gate.get("decision")
-    alert_status = alert.get("alert_status")
-    return decision == "ALLOW_PAPER" and alert_status in ("SENT", "DRY_RUN_READY")
+    return bool(decision_gate.get("allowed_for_paper_lifecycle", False))
 
 
 def _make_lifecycle_id(ts: str, symbol: str, side: str, entry: Any) -> str:
@@ -228,7 +226,7 @@ def compute_paper_lifecycle(
     symbol = (decision_gate or {}).get("symbol") or (alert or {}).get("symbol") or "UNKNOWN"
     source = (decision_gate or {}).get("block_id") or "S18_DECISION_GATE"
 
-    if decision_gate is None or alert is None:
+    if decision_gate is None:
         return _no_lifecycle(
             symbol, source, "MISSING_INPUTS", decision_gate, alert, trade_plan, scenario_trigger,
         )
@@ -242,6 +240,10 @@ def compute_paper_lifecycle(
             alert,
             trade_plan,
             scenario_trigger,
+        )
+    if not decision_gate.get("decision_id") or not (trade_plan or {}).get("trade_plan_id") or not (trade_plan or {}).get("signal_id"):
+        return _no_lifecycle(
+            symbol, source, "LINEAGE_FIELDS_MISSING", decision_gate, alert, trade_plan, scenario_trigger,
         )
 
     side = str(decision_gate.get("selected_side", "UNKNOWN")).upper()
@@ -423,7 +425,7 @@ def compute_paper_lifecycle(
         f"SYMBOL_{symbol}",
         f"SIDE_{side}",
         f"DECISION_{decision_gate.get('decision')}",
-        f"ALERT_STATUS_{alert.get('alert_status')}",
+        f"ALERT_STATUS_{(alert or {}).get('alert_status', 'N/A')}",
         f"LIFECYCLE_STATUS_{lifecycle_status}",
         f"DQ_{dq['level']}",
         "SAFE_TO_OPEN_REAL_TRADE_FALSE",
@@ -451,6 +453,10 @@ def compute_paper_lifecycle(
         "source": source,
         "input_status": "OK",
         "lifecycle_id": lifecycle_id,
+        "paper_trade_id": lifecycle_id,
+        "signal_id": (trade_plan or {}).get("signal_id"),
+        "trade_plan_id": (trade_plan or {}).get("trade_plan_id"),
+        "decision_id": (decision_gate or {}).get("decision_id"),
         "lifecycle_status": lifecycle_status,
         "side": side,
         "entry_price": entry_f,

@@ -18,6 +18,8 @@ HISTORY_PATH = epoch_data_path("signal_event_history.jsonl")
 FACTORY_PATH = epoch_state_path("latest_paper_trade_factory.json")
 GRADE_PATH = epoch_state_path("latest_signal_grade.json")
 SETUP_PATH = STATE_DIR / "latest_setup_family_activation.json"
+SETUP_CANDIDATE_PATH = STATE_DIR / "latest_setup_candidate.json"
+SCENARIO_PATH = STATE_DIR / "latest_scenario_trigger.json"
 TIMEFRAME_PATH = epoch_state_path("latest_timeframe_resolution.json")
 
 
@@ -124,6 +126,12 @@ def _merge_event(items: list[dict[str, Any]]) -> dict[str, Any]:
         "source_state_refs": source_state_refs_from_paths({"paper_trade_factory": FACTORY_PATH, "signal_grade": GRADE_PATH, "setup_activation": SETUP_PATH, "timeframe_resolution": TIMEFRAME_PATH}),
         "execution_safety": {"live_order_sent": False, "private_api_used": False},
         "setup_id": primary.get("setup_id"),
+        "active_scenario_id": primary.get("active_scenario_id"),
+        "trigger_type": primary.get("trigger_type", "EVENT_CONSOLIDATED"),
+        "trigger_state": primary.get("trigger_state", "TRIGGERED"),
+        "trigger_price": primary.get("entry"),
+        "confidence": safe_float(primary.get("grade_score")) or 0.0,
+        "blockers": list(primary.get("grade_blockers") or []),
         "signal_id": primary.get("signal_id") or stable_id("SIG", primary.get("event_id"), primary.get("symbol"), primary.get("direction")),
     }
 
@@ -131,6 +139,8 @@ def _merge_event(items: list[dict[str, Any]]) -> dict[str, Any]:
 def run_signal_event_consolidator() -> dict[str, Any]:
     context = current_runtime_context()
     factory = load_json(FACTORY_PATH) or {}
+    setup_candidate = load_json(SETUP_CANDIDATE_PATH) or {}
+    scenario_payload = load_json(SCENARIO_PATH) or {}
     grade_payload = load_json(GRADE_PATH) or {}
     grade_map = _grade_by_trade_id(grade_payload)
     registry = load_model_survival_registry()
@@ -149,6 +159,49 @@ def run_signal_event_consolidator() -> dict[str, Any]:
         if direction in {"LONG", "SHORT"}:
             bucket_directions.setdefault(bucket_key, set()).add(direction)
     events = [_merge_event(items) for items in grouped.values() if items]
+    if not events:
+        setup_id = str(setup_candidate.get("setup_id") or (setup_candidate.get("identity") or {}).get("setup_id") or "")
+        scenario_obj = scenario_payload.get("active_scenario") or {}
+        active_scenario_id = str(scenario_obj.get("scenario_id") or "")
+        if setup_id and active_scenario_id:
+            direction = str((setup_candidate.get("setup_candidate") or {}).get("setup_direction", "UNKNOWN")).upper()
+            event_id = stable_id("EVT", setup_id, active_scenario_id, context.get("loop_id"))
+            synthetic = {
+                "event_id": event_id,
+                "event_bucket_5m": _bucket_5m(),
+                "event_confluence_count": 1,
+                "symbol": str(setup_candidate.get("symbol") or context.get("symbol") or "BTCUSDT"),
+                "direction": direction,
+                "primary_model": "NO_MODEL",
+                "primary_setup": (setup_candidate.get("setup_candidate") or {}).get("setup_family"),
+                "entry": None,
+                "stop_loss": None,
+                "tp1": None,
+                "tp2": None,
+                "rr1": None,
+                "rr2": None,
+                "signal_grade": "WATCH",
+                "grade_score": 0.0,
+                "a_plus_ready": False,
+                "grade_reasons": ["SCENARIO_SETUP_SYNTHETIC_SIGNAL"],
+                "grade_blockers": [],
+                "activation_score": 0.0,
+                "supporting_models": [],
+                "supporting_setups": [],
+                "supporting_timeframes": [],
+                "source_trade_ids": [],
+                "source_state_refs": source_state_refs_from_paths({"setup_candidate": SETUP_CANDIDATE_PATH, "active_scenario": SCENARIO_PATH}),
+                "execution_safety": {"live_order_sent": False, "private_api_used": False},
+                "setup_id": setup_id,
+                "active_scenario_id": active_scenario_id,
+                "trigger_type": "SCENARIO_CONFIRMATION",
+                "trigger_state": "TRIGGERED",
+                "trigger_price": None,
+                "confidence": 0.0,
+                "blockers": [],
+                "signal_id": stable_id("SIG", setup_id, active_scenario_id),
+            }
+            events = [synthetic]
     events.sort(key=lambda item: (safe_float(item.get("grade_score")) or 0.0, int(item.get("event_confluence_count") or 0)), reverse=True)
     output = stamp_payload(
         {
@@ -179,7 +232,7 @@ def run_signal_event_consolidator() -> dict[str, Any]:
     for event in events[:50]:
         setup_id = str(event.get("setup_id") or "")
         signal_id = str(event.get("signal_id") or "")
-        if not setup_id or not signal_id:
+        if not setup_id or not signal_id or not str(event.get("active_scenario_id") or ""):
             continue
         append_event(
             "signal_events_clean.jsonl",

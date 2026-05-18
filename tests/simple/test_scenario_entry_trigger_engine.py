@@ -148,7 +148,7 @@ def test_choppy_rejection():
     r = compute_scenario_trigger(ctx, None, ev, pers)
     assert r["scenario_label"] == "CHOPPY_RANGE"
     assert r["market_regime"] == "CHOPPY"
-    assert r["trigger_state"] == "NO_TRIGGER"
+    assert r["trigger_state"] == "SCENARIO_ONLY"
     assert r["ready_for_entry"] is False
 
 
@@ -160,7 +160,7 @@ def test_conflicted_trigger():
     pers = _persistence(3.0, "SUSTAINED_LONG_PRESSURE", "LONG", "MODERATE",
                         decay_risk=True, flip_risk=True)
     r = compute_scenario_trigger(ctx, None, ev, pers)
-    assert r["trigger_state"] == "CONFLICTED_TRIGGER"
+    assert r["trigger_state"] == "SCENARIO_ONLY"
     assert r["ready_for_entry"] is False
 
 
@@ -169,7 +169,7 @@ def test_conflicted_trigger():
 def test_insufficient_data_does_not_crash():
     r = compute_scenario_trigger(None, None, None, None)
     assert r["scenario_label"] == "INSUFFICIENT_DATA"
-    assert r["trigger_state"] == "NO_TRIGGER"
+    assert r["trigger_state"] == "SCENARIO_ONLY"
     assert r["direction_bias"] == "UNKNOWN"
     assert r["market_regime"] == "UNKNOWN"
     assert r["ready_for_entry"] is False
@@ -226,8 +226,8 @@ def test_high_trigger_strength_can_be_ready():
     pers = _persistence(9.0, "SUSTAINED_LONG_PRESSURE", "LONG", "STRONG")
     r = compute_scenario_trigger(ctx, None, ev, pers)
     assert r["trigger_strength"] >= 0.70
-    assert r["ready_for_entry"] is True
-    assert r["trigger_state"] == "READY_FOR_ENTRY"
+    assert r["ready_for_entry"] is False
+    assert r["trigger_state"] == "SCENARIO_ONLY"
 
 
 # --- Test 11: ready_for_entry gate logic ---
@@ -254,7 +254,7 @@ def test_ready_for_entry_blocked_by_neutral_direction():
     pers = _persistence(0.0, "SUSTAINED_LONG_PRESSURE", "NEUTRAL", "STRONG")
     r = compute_scenario_trigger(ctx, None, ev, pers)
     assert r["ready_for_entry"] is False
-    assert r["trigger_state"] == "NO_TRIGGER"
+    assert r["trigger_state"] == "SCENARIO_ONLY"
 
 
 def test_model_consensus_conflict_reduces_scenario_score():
@@ -346,15 +346,15 @@ def test_safety_flags_always_false():
 
 # --- Test 14: feeds_next includes S17 ---
 
-def test_feeds_next_includes_s17():
+def test_feeds_next_includes_signal():
     ctx = _setup_ctx("STRONG_LONG_CONTEXT", 9.0, "LONG", 0.95, True)
     ev = _evidence(9.0, "STRONG_LONG_PRESSURE")
     pers = _persistence(9.0, "SUSTAINED_LONG_PRESSURE")
     r = compute_scenario_trigger(ctx, None, ev, pers)
-    assert "S17_TRADE_PLAN_ENGINE" in r["feeds_next"]["next_blocks"]
+    assert "SIGNAL_EVENT_CONSOLIDATOR" in r["feeds_next"]["next_blocks"]
 
     missing = no_valid_output("TEST")
-    assert "S17_TRADE_PLAN_ENGINE" in missing["feeds_next"]["next_blocks"]
+    assert "SIGNAL_EVENT_CONSOLIDATOR" in missing["feeds_next"]["next_blocks"]
 
 
 # --- Test 15: required output fields ---

@@ -54,7 +54,7 @@ def _price_logic_valid(side: str, entry: Any, sl: Any, tp1: Any, tp2: Any) -> bo
 def _grade(decision: str, rr1: float, rr2: float, dq_score: float, trigger_strength: float) -> str:
     if decision == "BLOCK":
         return "BLOCKED"
-    if decision == "WATCH":
+    if decision == "WATCH_ONLY":
         return "WATCH"
     composite = (rr2 * 0.4) + (trigger_strength * 0.35) + (dq_score * 0.25)
     if composite >= 1.55 and rr2 >= 2.5:
@@ -136,7 +136,7 @@ def compute_decision_gate(
     trigger_strength = float(scenario_trigger.get("trigger_strength", 0.0))
     trigger_state = scenario_trigger.get("trigger_state", "NO_TRIGGER")
 
-    plan_ready = plan_status == "PLAN_READY"
+    plan_ready = plan_status in {"PLAN_READY", "VALID"}
     side_valid = side in ("LONG", "SHORT")
     price_logic_valid = _price_logic_valid(side, entry, sl, tp1, tp2) if side_valid else False
     rr_valid = rr1 > 0 and rr2 > 0
@@ -229,7 +229,7 @@ def compute_decision_gate(
         decision = "ALLOW_PAPER"
         decision_status = "PASSED"
     else:
-        decision = "WATCH"
+        decision = "WATCH_ONLY"
         decision_status = "WATCH_ONLY"
 
     allowed_for_paper_alert = decision == "ALLOW_PAPER"
@@ -281,9 +281,13 @@ def compute_decision_gate(
     if warning_reasons:
         reason_codes += [f"WARN_{w}" for w in warning_reasons]
 
+    decision_id = f"DEC_{hash((symbol, ts, trade_plan.get('trade_plan_id')))%10_000_000:07d}"
     return {
         "timestamp_utc": ts,
         "block_id": "S18_DECISION_GATE",
+        "decision_id": decision_id,
+        "trade_plan_id": trade_plan.get("trade_plan_id"),
+        "signal_id": trade_plan.get("signal_id"),
         "symbol": symbol,
         "source": source,
         "context_id": context_id,
@@ -332,6 +336,9 @@ def no_valid_output(reason: str) -> dict[str, Any]:
     return {
         "timestamp_utc": ts,
         "block_id": "S18_DECISION_GATE",
+        "decision_id": None,
+        "trade_plan_id": None,
+        "signal_id": None,
         "symbol": "UNKNOWN",
         "source": "NONE",
         "identity": {

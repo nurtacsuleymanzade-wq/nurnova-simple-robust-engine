@@ -13,6 +13,7 @@ DATA_DIR = Path("data/simple")
 REPORTS_DIR = Path("reports/simple")
 
 SCENARIO_TRIGGER_PATH = STATE_DIR / "latest_scenario_trigger.json"
+SIGNAL_EVENT_PATH = STATE_DIR / "latest_signal_event.json"
 SETUP_CONTEXT_PATH = STATE_DIR / "latest_setup_context.json"
 FLOW_STATE_PATH = STATE_DIR / "latest_flow_state.json"
 EVIDENCE_PATH = STATE_DIR / "latest_flow_evidence.json"
@@ -248,11 +249,14 @@ def compute_trade_plan(
     model_registry: dict[str, Any] | None = None,
     depth_memory: dict[str, Any] | None = None,
     context_sync: dict[str, Any] | None = None,
+    signal_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ts = _now_utc()
     reason_codes: list[str] = []
 
     missing = []
+    if signal_event is None:
+        missing.append("SIGNAL_EVENT_MISSING")
     if scenario_trigger is None:
         missing.append("SCENARIO_TRIGGER_MISSING")
     if setup_context is None:
@@ -261,9 +265,10 @@ def compute_trade_plan(
         missing.append("FLOW_STATE_MISSING")
 
     input_status = "OK"
-    if scenario_trigger is None:
+    if signal_event is None:
         input_status = "MISSING"
 
+    signal_event = signal_event or {}
     scenario_trigger = scenario_trigger or {}
     setup_context = setup_context or {}
     flow_state = flow_state or {}
@@ -280,14 +285,15 @@ def compute_trade_plan(
         or flow_state.get("symbol")
         or "UNKNOWN"
     )
-    source = scenario_trigger.get("block_id") or "S16_SCENARIO_ENTRY_TRIGGER"
+    source = signal_event.get("block_id") or scenario_trigger.get("block_id") or "SIGNAL_EVENT_CONSOLIDATOR"
     setup_label = setup_context.get("setup_context_label", "INSUFFICIENT_CONTEXT")
     setup_tradeable = bool(setup_context.get("tradeable", False))
 
-    direction_bias = scenario_trigger.get("direction_bias", "UNKNOWN")
-    trigger_state = scenario_trigger.get("trigger_state", "NO_TRIGGER")
-    ready_for_entry = bool(scenario_trigger.get("ready_for_entry", False))
-    trigger_strength = float(scenario_trigger.get("trigger_strength", 0.0))
+    signal_direction = str(signal_event.get("direction") or "UNKNOWN").upper()
+    direction_bias = signal_direction if signal_direction in {"LONG", "SHORT", "NEUTRAL"} else scenario_trigger.get("direction_bias", "UNKNOWN")
+    trigger_state = signal_event.get("trigger_state", "NO_SIGNAL")
+    ready_for_entry = bool(signal_event.get("signal_id"))
+    trigger_strength = float(signal_event.get("confidence", 0.0) or scenario_trigger.get("trigger_strength", 0.0))
     scenario_label = scenario_trigger.get("scenario_label", "INSUFFICIENT_DATA")
     confidence = float(setup_context.get("confidence", 0.0) or scenario_trigger.get("trigger_confidence", 0.0))
 
@@ -327,7 +333,7 @@ def compute_trade_plan(
     model_veto = False
     model_veto_reason: str | None = None
 
-    if input_status == "MISSING" or not scenario_trigger:
+    if input_status == "MISSING" or not signal_event or not signal_event.get("signal_id"):
         plan_status = "NO_PLAN"
         reason_codes.extend(missing or ["INPUT_MISSING"])
         reason_codes.append("PLAN_BLOCKED_NO_INPUTS")
@@ -359,7 +365,7 @@ def compute_trade_plan(
         stop_reason = f"Indicative stop at {stop_loss} (stop_pct={round(sp,5)}) — not actionable due to DQ."
         tp_reason = f"Indicative TP1/TP2 at {tp1}/{tp2} based on stop distance multiples."
         invalidation_reason = f"Invalidation aligned with stop at {invalidation_price}."
-    elif not ready_for_entry or trigger_state != "READY_FOR_ENTRY":
+    elif not ready_for_entry or trigger_state not in {"TRIGGERED", "READY_FOR_ENTRY"}:
         plan_status = "WATCH_ONLY"
         reason_codes.append(f"NOT_READY_TRIGGER_{trigger_state}")
         entry_price = round(ref_price, 4)
@@ -411,7 +417,7 @@ def compute_trade_plan(
                     plan_status = "WATCH_ONLY"
                     reason_codes.append("LOW_RR_DOWNGRADE")
                 else:
-                    plan_status = "PLAN_READY"
+                    plan_status = "VALID"
                 entry_reason = (
                     f"Scenario {scenario_label} READY_FOR_ENTRY with trigger_strength={trigger_strength}; "
                     f"entry at reference price {entry_price}."
@@ -496,7 +502,7 @@ def compute_trade_plan(
         if preview_plan is not None:
             reason_codes.append("PREVIEW_ONLY_LEVELS")
 
-    if plan_status == "PLAN_READY":
+    if plan_status == "VALID":
         plan_grade = _grade_from_rr(rr_tp1, rr_tp2, trigger_strength, confidence)
     elif plan_status == "WATCH_ONLY":
         plan_grade = "WATCH"
@@ -507,7 +513,7 @@ def compute_trade_plan(
         quality_score = _quality_score(rr_tp1, rr_tp2, trigger_strength, confidence, dq_score)
 
     plan_explanation = {
-        "ready": "Plan ready — all gates passed." if plan_status == "PLAN_READY" else None,
+        "ready": "Plan ready — all gates passed." if plan_status == "VALID" else None,
         "watch": "Watch only — scenario present but gates not passed." if plan_status == "WATCH_ONLY" else None,
         "no_plan": "No plan — inputs missing or no actionable side." if plan_status == "NO_PLAN" else None,
         "invalid": "Invalid — price/direction or stop distance malformed." if plan_status == "INVALID" else None,
@@ -557,6 +563,8 @@ def compute_trade_plan(
     return {
         "timestamp_utc": ts,
         "block_id": "S17_TRADE_PLAN_ENGINE",
+        "trade_plan_id": hashlib.sha1(f"{symbol}|{signal_event.get('signal_id') or 'NO_SIGNAL'}|{ts}".encode("utf-8")).hexdigest()[:16],
+        "signal_id": signal_event.get("signal_id"),
         "symbol": symbol,
         "source": source,
         "context_id": context_id,
@@ -617,6 +625,8 @@ def no_valid_output(reason: str) -> dict[str, Any]:
     return {
         "timestamp_utc": ts,
         "block_id": "S17_TRADE_PLAN_ENGINE",
+        "trade_plan_id": None,
+        "signal_id": None,
         "symbol": "UNKNOWN",
         "source": "NONE",
         "input_status": "MISSING",
@@ -699,6 +709,7 @@ def run_trade_plan_engine() -> dict[str, Any]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
+    signal_event = _load_json(SIGNAL_EVENT_PATH)
     scenario_trigger = _load_json(SCENARIO_TRIGGER_PATH)
     setup_context = _load_json(SETUP_CONTEXT_PATH)
     flow_state = _load_json(FLOW_STATE_PATH)
@@ -709,15 +720,15 @@ def run_trade_plan_engine() -> dict[str, Any]:
     depth_memory = _load_json(DEPTH_MEMORY_PATH)
     context_sync = _load_json(CONTEXT_SYNC_PATH)
 
-    if scenario_trigger is None:
-        result = no_valid_output("SCENARIO_TRIGGER_MISSING")
+    if signal_event is None:
+        result = no_valid_output("SIGNAL_EVENT_MISSING")
     else:
         try:
             result = compute_trade_plan(
                 scenario_trigger, setup_context, flow_state, evidence, persistence,
                 market_truth=market_truth,
                 model_registry=model_registry,
-                depth_memory=depth_memory, context_sync=context_sync,
+                depth_memory=depth_memory, context_sync=context_sync, signal_event=signal_event,
             )
         except Exception:
             result = no_valid_output("COMPUTE_ERROR")

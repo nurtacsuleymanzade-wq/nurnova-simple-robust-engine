@@ -245,7 +245,8 @@ def _build_lifecycle(internal_outcome: dict[str, Any]) -> dict[str, Any]:
 
 
 def _build_edge_eligibility(internal_outcome: dict[str, Any]) -> dict[str, Any]:
-    edge_eligible = bool(internal_outcome.get("edge_eligible", False))
+    closed_outcome = str(internal_outcome.get("outcome", "INVALID")) in {"WIN_TP1", "WIN_TP2", "LOSS"}
+    edge_eligible = bool(internal_outcome.get("edge_eligible", False)) and closed_outcome
     return {"edge_eligible": edge_eligible, "feeds_edge_stats": edge_eligible}
 
 
@@ -332,6 +333,7 @@ def build_paper_outcome(
         "outcome_check": outcome_check,
         "lifecycle": lifecycle,
         "result": result,
+        "closed_only": str(result.get("outcome", "INVALID")) in {"WIN_TP1", "WIN_TP2", "LOSS"},
         "edge_eligibility": edge_eligibility,
         "execution_safety": safety,
         "data_quality": data_quality,

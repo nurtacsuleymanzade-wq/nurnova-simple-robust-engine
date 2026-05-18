@@ -171,6 +171,37 @@ def _build_identity(
     }
 
 
+def _possible_scenarios(scenario_label: str, direction_bias: str, market_regime: str) -> list[dict[str, Any]]:
+    continuation = {
+        "scenario_id": "SCN_CONTINUATION",
+        "label": "CONTINUATION",
+        "hypothesis": "Current pressure continues along prevailing path.",
+        "path_conditions": ["persistence_maintains", "no_flip_risk"],
+        "invalidation": "opposite_pressure_persists",
+    }
+    reversal = {
+        "scenario_id": "SCN_REVERSAL",
+        "label": "REVERSAL",
+        "hypothesis": "Current pressure exhausts and opposite side takes control.",
+        "path_conditions": ["flip_risk_or_decay", "counter_pressure_rises"],
+        "invalidation": "trend_reacceleration",
+    }
+    ranging = {
+        "scenario_id": "SCN_RANGE",
+        "label": "RANGE",
+        "hypothesis": "Price rotates without directional continuation.",
+        "path_conditions": ["mixed_flow", "balanced_auction"],
+        "invalidation": "clean_break_with_followthrough",
+    }
+    if scenario_label == "INSUFFICIENT_DATA":
+        return []
+    if market_regime == "CHOPPY" or direction_bias == "NEUTRAL":
+        return [ranging, continuation, reversal]
+    if "REVERSAL" in scenario_label:
+        return [reversal, continuation, ranging]
+    return [continuation, reversal, ranging]
+
+
 def _trigger_strength(
     confidence: float,
     setup_score: float,
@@ -420,13 +451,13 @@ def compute_scenario_trigger(
         scenario_label = "NO_SCENARIO"
         scenario_score = 0.0
         trigger_strength = 0.0
-        trigger_state = "NO_TRIGGER"
+        trigger_state = "SCENARIO_ONLY"
         move_p, failure_p, fakeout_p = 0.0, 1.0, 0.0
         market_regime = "RANGING"
         trigger_confidence = 0.0
         ready = False
         tradeable = False
-        trigger_reason = "Setup context blocked actionable scenario generation."
+        trigger_reason = "Scenario layer is hypothesis-only; signal is produced downstream."
         reason_codes.append("BLOCKED_BY_NO_TRADE_CONTEXT")
         if not tradeable_context:
             reason_codes.append("NOT_TRADEABLE_CONTEXT")
@@ -444,11 +475,7 @@ def compute_scenario_trigger(
             context_confidence, setup_score, continuation_quality, decay_risk, flip_risk
         )
 
-        trigger_state = _trigger_state(
-            scenario_label, setup_label, direction_bias, tradeable_context,
-            context_confidence, trigger_strength, decay_risk, flip_risk,
-            dq_level, persistence_label, input_status,
-        )
+        trigger_state = "SCENARIO_ONLY"
 
         move_p, failure_p, fakeout_p = _probabilities(
             trigger_strength, decay_risk, flip_risk, scenario_label
@@ -460,20 +487,20 @@ def compute_scenario_trigger(
 
         trigger_confidence = _clamp(round(context_confidence * trigger_strength, 4), 0.0, 1.0)
 
-        ready = _ready_for_entry(
-            trigger_state, tradeable_context, context_confidence, trigger_strength,
-            dq_level, persistence_label, direction_bias,
-        )
-
-        tradeable = ready
-
-        trigger_reason = _trigger_reason(
-            scenario_label, trigger_state, decay_risk, flip_risk,
-            context_confidence, trigger_strength,
-        )
+        ready = False
+        tradeable = False
+        trigger_reason = "Scenario layer does not authorize entry; use signal_event layer."
 
     candle_close_time = _flow_candle_close_time(flow_state)
     identity = _build_identity(setup_context, model_registry, symbol, candle_close_time, scenario_label)
+    possible_scenarios = _possible_scenarios(scenario_label, direction_bias, market_regime)
+    active_scenario = possible_scenarios[0] if possible_scenarios else {
+        "scenario_id": "SCN_NONE",
+        "label": "NO_SCENARIO",
+        "hypothesis": "Insufficient data for active scenario.",
+        "path_conditions": [],
+        "invalidation": "n/a",
+    }
 
     reason_codes += [
         f"SYMBOL_{symbol}",
@@ -504,6 +531,8 @@ def compute_scenario_trigger(
         "context_id": identity.get("context_id"),
         "scenario_label": scenario_label,
         "scenario_score": scenario_score,
+        "possible_scenarios": possible_scenarios,
+        "active_scenario": active_scenario,
         "direction_bias": direction_bias,
         "diagnostic_direction_bias": diagnostic_direction_bias,
         "trigger_state": trigger_state,
@@ -527,7 +556,7 @@ def compute_scenario_trigger(
         "candle_close_time": candle_close_time,
         "data_quality": {"level": dq_level, "score": dq_score},
         "reason_codes": reason_codes,
-        "feeds_next": {"next_blocks": ["S17_TRADE_PLAN_ENGINE"]},
+        "feeds_next": {"next_blocks": ["SIGNAL_EVENT_CONSOLIDATOR"]},
         "execution_safety": {
             "safe_to_open_real_trade": False,
             "private_api_used": False,
@@ -548,10 +577,18 @@ def no_valid_output(reason: str) -> dict[str, Any]:
         "scenario_score": 0.0,
         "direction_bias": "UNKNOWN",
         "diagnostic_direction_bias": "UNKNOWN",
-        "trigger_state": "NO_TRIGGER",
+        "possible_scenarios": [],
+        "active_scenario": {
+            "scenario_id": "SCN_NONE",
+            "label": "NO_SCENARIO",
+            "hypothesis": "Input files missing — cannot determine scenario.",
+            "path_conditions": [],
+            "invalidation": "n/a",
+        },
+        "trigger_state": "SCENARIO_ONLY",
         "trigger_strength": 0.0,
         "trigger_confidence": 0.0,
-        "trigger_reason": "Input files missing — cannot determine scenario.",
+        "trigger_reason": "Scenario layer is hypothesis-only.",
         "estimated_move_probability": 0.33,
         "estimated_failure_probability": 0.33,
         "estimated_fakeout_probability": 0.34,
@@ -585,7 +622,7 @@ def no_valid_output(reason: str) -> dict[str, Any]:
             "NO_TELEGRAM",
             "NO_ORDER_EXECUTION",
         ],
-        "feeds_next": {"next_blocks": ["S17_TRADE_PLAN_ENGINE"]},
+        "feeds_next": {"next_blocks": ["SIGNAL_EVENT_CONSOLIDATOR"]},
         "execution_safety": {
             "safe_to_open_real_trade": False,
             "private_api_used": False,
