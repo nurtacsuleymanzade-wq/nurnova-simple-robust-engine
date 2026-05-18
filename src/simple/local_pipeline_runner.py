@@ -90,12 +90,15 @@ _LEGACY_BRIDGE_STAGES: list[tuple[str, str, str]] = [
     ("src.simple.candle_quality_engine", "NOARG", "CQE_CANDLE_QUALITY"),
     ("src.simple.model_registry", "NOARG", "MODEL_REGISTRY"),
     ("src.simple.scenario_entry_trigger_engine", "NOARG", "S16_SCENARIO_ENTRY_TRIGGER"),
+    ("src.simple.simple_brain_report_engine", "run_fake_sample", "S10_SIMPLE_BRAIN_REPORT"),
+]
+
+_DISABLED_LEGACY_ACTIVE_OPENER_STAGES: list[tuple[str, str, str]] = [
     ("src.simple.trade_plan_engine", "NOARG", "S17_TRADE_PLAN"),
     ("src.simple.decision_gate_engine", "NOARG", "S18_DECISION_GATE"),
     ("src.simple.paper_lifecycle_tracker", "NOARG", "S20_PAPER_LIFECYCLE"),
     ("src.simple.outcome_monitor", "NOARG", "S21_OUTCOME_MONITOR"),
     ("src.simple.edge_matrix_v2", "NOARG", "S22_EDGE_MATRIX"),
-    ("src.simple.simple_brain_report_engine", "run_fake_sample", "S10_SIMPLE_BRAIN_REPORT"),
 ]
 
 _STAGES = list(_ACTIVE_CHAIN_STAGES) + list(_LEGACY_BRIDGE_STAGES)
@@ -358,6 +361,7 @@ def run_pipeline(symbol: str, source_mode: str = "LIVE") -> dict[str, Any]:
         f"CONTEXT_{context_id}",
         f"BLOCKS_PASSED_{blocks_passed}",
         f"BLOCKS_FAILED_{blocks_failed}",
+        "LEGACY_S17_DISABLED_AS_ACTIVE_OPENER",
         "SAFE_TO_OPEN_REAL_TRADE_FALSE",
         "NO_LIVE_TRADING",
         "NO_PRIVATE_API",

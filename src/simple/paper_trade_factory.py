@@ -909,15 +909,15 @@ def run_paper_trade_factory() -> dict[str, Any]:
     trades: list[dict[str, Any]] = []
     new_trade_slots_used = 0
 
-    decision_status = str(contract_decision.get("decision_status") or "").upper()
-    execution_permission = str(contract_decision.get("execution_permission") or "").upper()
+    decision_status = str(contract_decision.get("paper_decision") or contract_decision.get("decision_status") or "").upper()
+    paper_permission = bool(contract_decision.get("paper_permission") or contract_decision.get("paper_execution_permission"))
     setup_id = str(contract_trade_plan.get("setup_id") or contract_decision.get("setup_id") or "")
     signal_id = str(contract_trade_plan.get("signal_id") or contract_decision.get("signal_id") or "")
     plan_id = str(contract_trade_plan.get("plan_id") or contract_decision.get("plan_id") or "")
     decision_id = str(contract_decision.get("decision_id") or "")
     plan_status = str(contract_trade_plan.get("plan_status") or "").upper()
     contract_direction = str(contract_trade_plan.get("direction") or contract_decision.get("direction") or "UNKNOWN").upper()
-    contract_entry = safe_float(contract_trade_plan.get("entry"))
+    contract_entry = safe_float(contract_trade_plan.get("entry") or contract_trade_plan.get("entry_price"))
     contract_stop_loss = safe_float(contract_trade_plan.get("stop_loss"))
     contract_tp1 = safe_float(contract_trade_plan.get("tp1"))
     contract_tp2 = safe_float(contract_trade_plan.get("tp2"))
@@ -925,8 +925,8 @@ def run_paper_trade_factory() -> dict[str, Any]:
     setup_family = str(contract_trade_plan.get("setup_family") or contract_decision.get("setup_family") or "UNKNOWN")
     contract_trade_opened = False
 
-    if execution_permission != "ALLOW_OPEN":
-        contract_bridge_reason_codes.append("EXECUTION_PERMISSION_NOT_ALLOW_OPEN")
+    if not paper_permission:
+        contract_bridge_reason_codes.append("PAPER_PERMISSION_NOT_GRANTED")
     elif decision_status != "ALLOW_PAPER":
         contract_bridge_reason_codes.append("CONTRACT_DECISION_NOT_ALLOWING")
     elif plan_status != "PLAN_READY":
@@ -1012,18 +1012,20 @@ def run_paper_trade_factory() -> dict[str, Any]:
                         {
                             "CONTRACT_DECISION_GATE_SOURCE",
                             "CONTRACT_BRIDGE_OPENED",
+                            "PAPER_OPENED_FROM_CONTRACT_DRIVEN_CHAIN",
                             "PAPER_ONLY",
                             "NO_LIVE_EXECUTION",
                             "NO_PRIVATE_API",
                         }
                     ),
                     "blocked_by": [],
-                    "execution_safety": {"live_order_sent": False, "private_api_used": False},
+                    "execution_safety": {"safe_to_open_real_trade": False, "live_order_sent": False, "private_api_used": False},
                 }
             )
             new_trade_slots_used += 1
             contract_trade_opened = True
             contract_bridge_reason_codes.append("CONTRACT_BRIDGE_TRADE_OPENED")
+            contract_bridge_reason_codes.append("PAPER_OPENED_FROM_CONTRACT_DRIVEN_CHAIN")
 
     ranked_clusters = sorted(
         selected_clusters,

@@ -29,11 +29,10 @@ HARD_BLOCK_REASONS = {
     "ENTRY_SL_TP_MISSING",
     "SIGNAL_ID_MISSING",
     "PLAN_ID_MISSING",
-    "RR_LOW_METADATA_ONLY",
-    "DATA_QUALITY_METADATA_ONLY",
     "SETUP_ID_MISSING",
     "DECISION_ID_MISSING",
 }
+SAFETY = {"safe_to_open_real_trade": False, "private_api_used": False, "live_order_sent": False}
 
 
 def _utc_now() -> str:
@@ -63,6 +62,23 @@ def _as_float(v: Any) -> float | None:
         return None
 
 
+def _quality_label(quality: dict[str, Any] | None) -> str:
+    raw = (quality or {}).get("data_quality")
+    if isinstance(raw, dict):
+        return str(raw.get("level") or raw.get("label") or "UNKNOWN").upper()
+    return str(raw or (quality or {}).get("quality_label") or "UNKNOWN").upper()
+
+
+def _price_geometry_valid(direction: str, entry: float | None, stop_loss: float | None, tp1: float | None, tp2: float | None) -> bool:
+    if entry is None or stop_loss is None or tp1 is None or tp2 is None:
+        return False
+    if direction == "LONG":
+        return stop_loss < entry < tp1 <= tp2
+    if direction == "SHORT":
+        return stop_loss > entry > tp1 >= tp2
+    return False
+
+
 def build_contract_decision_gate(
     symbol: str = "BTCUSDT",
     trade_plan_payload: dict[str, Any] | None = None,
@@ -88,6 +104,12 @@ def build_contract_decision_gate(
             "mode": MODE,
             "data_quality": "DEGRADED",
             "decision_status": "BLOCK",
+            "paper_decision": "BLOCK",
+            "paper_permission": False,
+            "paper_execution_permission": False,
+            "real_execution_permission": False,
+            "real_trade_allowed": False,
+            "execution_permission": "BLOCK_OPEN",
             "direction": "NEUTRAL",
             "contract_id": None,
             "setup_family": None,
@@ -115,6 +137,7 @@ def build_contract_decision_gate(
             "confidence": 0.0,
             "reason_codes": ["TRADE_PLAN_MISSING", "DECISION_BLOCK"],
             "feeds_next": FEEDS_NEXT,
+            "execution_safety": dict(SAFETY),
         }
 
     direction = str(trade_plan.get("direction", "NEUTRAL")).upper()
@@ -124,6 +147,7 @@ def build_contract_decision_gate(
     entry = _as_float(trade_plan.get("entry"))
     stop_loss = _as_float(trade_plan.get("stop_loss"))
     tp1 = _as_float(trade_plan.get("tp1"))
+    tp2 = _as_float(trade_plan.get("tp2"))
     rr1 = _as_float(trade_plan.get("rr1"))
     rr2 = _as_float(trade_plan.get("rr2"))
     structure_bias = str((structure or {}).get("structure_bias", "UNKNOWN")).upper()
@@ -138,7 +162,7 @@ def build_contract_decision_gate(
         (structure_bias == "SHORT" and direction == "LONG") or (structure_bias == "LONG" and direction == "SHORT")
     )
     rr_valid = (rr1 is not None and rr1 >= 1.2) and (rr2 is not None and rr2 >= 1.5)
-    dq_text = str((quality or {}).get("data_quality", (quality or {}).get("quality_label", "UNKNOWN"))).upper()
+    dq_text = _quality_label(quality)
     data_quality_valid = dq_text in {"OK", "HIGH", "MEDIUM"}
     session_aligned = not session_downgrade
 
@@ -152,6 +176,8 @@ def build_contract_decision_gate(
         block_reasons.append("STRUCTURE_DIRECTION_CONFLICT")
     if entry is None or stop_loss is None or tp1 is None:
         block_reasons.append("ENTRY_SL_TP_MISSING")
+    if not _price_geometry_valid(direction, entry, stop_loss, tp1, tp2):
+        block_reasons.append("PRICE_GEOMETRY_INVALID")
     if not setup_id:
         block_reasons.append("SETUP_ID_MISSING")
     if not signal_id:
@@ -164,7 +190,7 @@ def build_contract_decision_gate(
         dq = "INVALID" if "STRUCTURE_DIRECTION_CONFLICT" in block_reasons else "DEGRADED"
         confidence = 0.0
     else:
-        if plan_status in {"PLAN_READY", "NO_PLAN", "NOT_READY", "INVALID"} and direction in {"LONG", "SHORT"} and entry is not None and stop_loss is not None and tp1 is not None:
+        if plan_status == "PLAN_READY" and bool(trade_plan.get("paper_executable", False)) and direction in {"LONG", "SHORT"} and entry is not None and stop_loss is not None and tp1 is not None:
             decision = "ALLOW_PAPER"
             allow_reasons.append("EXPLORATION_ALLOW_ACTIVE")
             allow_reasons.append("HARD_BLOCK_CONDITIONS_NOT_TRIGGERED")
@@ -202,11 +228,11 @@ def build_contract_decision_gate(
     reason_codes.extend(downgrade_reasons)
     reason_codes.append(f"DECISION_{decision}")
 
-    execution_permission = "ALLOW_OPEN"
-    if any(reason in HARD_BLOCK_REASONS for reason in (block_reasons + downgrade_reasons + reason_codes)):
-        execution_permission = "BLOCK_OPEN"
-    elif decision != "ALLOW_PAPER":
-        execution_permission = "METADATA_ONLY_NO_OPEN"
+    paper_permission = decision == "ALLOW_PAPER" and not block_reasons
+    paper_decision = "ALLOW_PAPER" if paper_permission else decision
+    real_execution_permission = False
+    real_trade_allowed = False
+    execution_permission = "BLOCK_OPEN"
     decision_id = stable_id("DEC", symbol, setup_id, signal_id, plan_id, _utc_now())
 
     return {
@@ -223,6 +249,11 @@ def build_contract_decision_gate(
         "mode": MODE,
         "data_quality": dq,
         "decision_status": decision,
+        "paper_decision": paper_decision,
+        "paper_permission": paper_permission,
+        "paper_execution_permission": paper_permission,
+        "real_execution_permission": real_execution_permission,
+        "real_trade_allowed": real_trade_allowed,
         "execution_permission": execution_permission,
         "direction": direction if direction in {"LONG", "SHORT", "NEUTRAL"} else "NEUTRAL",
         "contract_id": trade_plan.get("contract_id"),
@@ -251,6 +282,7 @@ def build_contract_decision_gate(
         "confidence": round(max(0.0, min(1.0, confidence)), 3),
         "reason_codes": sorted(set(reason_codes)),
         "feeds_next": FEEDS_NEXT,
+        "execution_safety": dict(SAFETY),
     }
 
 
@@ -267,6 +299,7 @@ def _fake_trade_plan(symbol: str) -> dict[str, Any]:
         "tp2": 101.8,
         "rr1": 1.2,
         "rr2": 1.8,
+        "paper_executable": True,
         "plan_confidence": 0.72,
         "session_downgrade": False,
         "regime_alignment": "ALIGNED",
@@ -309,4 +342,3 @@ def run_contract_decision_gate(symbol: str = "BTCUSDT", fake_sample: bool = Fals
             ),
         )
     return payload
-
